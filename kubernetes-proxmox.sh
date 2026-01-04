@@ -17,19 +17,19 @@ Kubernetes on Proxmox - Cluster Management Script
 OPTIONS:
     -a ACTION    Run in non-interactive mode with specified action
                  Actions: install, reconfigure, scale, reset, destroy, status, cleanup, update-deps, export-kubeconfig
-    -h           Show this help message
+    -h           Display this help message
 
 EXAMPLES:
     # Interactive mode (default)
     $0
 
     # Non-interactive mode
-    $0 -a install       # Fresh install from scratch
+    $0 -a install       # Initial installation
     $0 -a reconfigure   # Update existing cluster
-    $0 -a status        # View cluster status
-    $0 -a cleanup       # Kill stuck processes
+    $0 -a status        # Display cluster status
+    $0 -a cleanup       # Terminate stuck processes
     $0 -a update-deps   # Update packages on all nodes
-    $0 -a export-kubeconfig  # Export kubeconfig for Lens/external access
+    $0 -a export-kubeconfig  # Export kubeconfig for external access
 
 EOF
 }
@@ -1794,7 +1794,7 @@ cat > "${ANSIBLE_PLAYBOOK}" <<\EOF
 
     - name: Disable Ubuntu Pro services that may interfere
       shell: |
-        # Disable ESM cache and apt news services that auto-restart and cause issues
+        # Disable ESM cache and apt news services that restart automatically and cause issues
         echo "Disabling Ubuntu Pro background services..."
         systemctl stop esm-cache.service 2>/dev/null || true
         systemctl disable esm-cache.service 2>/dev/null || true
@@ -2324,7 +2324,7 @@ log "===========================================================================
 }
 
 action_fresh_install() {
-    log "Fresh install - destroying all VMs and recreating from scratch..."
+    log "Initial installation - destroying all VMs and recreating..."
     cleanup_previous_run
 
     echo ""
@@ -2338,7 +2338,7 @@ action_fresh_install() {
     echo ""
 
     if ! confirm_action "Are you ABSOLUTELY SURE you want to proceed?"; then
-        log "Fresh install cancelled"
+        log "Initial installation cancelled"
         return 0
     fi
 
