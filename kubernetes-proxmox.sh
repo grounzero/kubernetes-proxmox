@@ -709,12 +709,19 @@ validate_k8s_version() {
             local available_versions
             local kubeadm_section
 
+            # Helper to extract a package section from package_info
+            extract_package_section() {
+                local package_name="$1"
+                local package_data="$2"
+                awk -v target_pkg="$package_name" '
+                    $0 == "Package: " target_pkg { in_pkg = 1; print; next }
+                    /^Package:/ && in_pkg { exit }
+                    in_pkg { print }
+                ' <<< "${package_data}"
+            }
+
             # Extract the kubeadm package section, then list up to 5 recent versions
-            if kubeadm_section=$(printf '%s\n' "${package_info}" | awk '
-                /^Package: kubeadm$/ { in_kubeadm = 1; print; next }
-                /^Package:/ && in_kubeadm { exit }
-                in_kubeadm { print }
-            '); then
+            if kubeadm_section=$(extract_package_section "kubeadm" "${package_info}"); then
                 if ! available_versions=$(printf '%s\n' "${kubeadm_section}" | grep '^Version:' | head -n 5 | sed 's/^Version: /  - /'); then
                     available_versions="  (could not list versions)"
                 fi
