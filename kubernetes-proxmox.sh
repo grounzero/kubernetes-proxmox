@@ -693,8 +693,17 @@ validate_k8s_version() {
             log "ERROR: Available versions can be found at: https://kubernetes.io/releases/"
 
             # Try to show available versions
-            local available_versions=$(echo "${package_info}" | awk '/^Package: kubeadm$/ { in_kubeadm=1; next } /^Package:/ { in_kubeadm=0 } in_kubeadm && /^Version:/ { print; count++; if (count>=5) exit }' | sed 's/Version: /  - /' || echo "  (could not list versions)")
+            local available_versions
+            local kubeadm_section
 
+            # Extract the kubeadm package section, then list up to 5 recent versions
+            if kubeadm_section=$(printf '%s\n' "${package_info}" | awk '/^Package: kubeadm$/,/^Package:/'); then
+                if ! available_versions=$(printf '%s\n' "${kubeadm_section}" | grep '^Version:' | head -n 5 | sed 's/^Version: /  - /'); then
+                    available_versions="  (could not list versions)"
+                fi
+            else
+                available_versions="  (could not list versions)"
+            fi
             log "Recent versions in repository:"
             echo "${available_versions}" | while read -r line; do
                 log "${line}"
