@@ -186,6 +186,9 @@ RESOURCE_CHECK_ENABLED=false ./kubernetes-proxmox.sh -a install
 ```bash
 # Set custom SSH timeout (default: 600 seconds)
 SSH_WAIT_TIMEOUT_SECONDS=900 ./kubernetes-proxmox.sh -a reconfigure
+
+# Set custom cloud-init timeout (default: 300 seconds)
+CLOUD_INIT_TIMEOUT_SECONDS=600 ./kubernetes-proxmox.sh -a install
 ```
 
 ## Menu Options Explained
