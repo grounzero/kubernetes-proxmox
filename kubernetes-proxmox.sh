@@ -1008,8 +1008,20 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
 
         # Extract only the checksum for our specific file
         local expected_checksum=$(grep "$(basename "${UBUNTU_IMAGE_FILE}")" "${sha256_file}" | awk '{print $1}')
+        local actual_checksum
+        if ! actual_checksum=$(sha256sum "${UBUNTU_IMAGE_PATH}" | awk '{print $1}'); then
+            log "ERROR: Failed to calculate SHA256 checksum for ${UBUNTU_IMAGE_PATH}"
+            log "ERROR: The downloaded image may be corrupted, unreadable, or missing"
+            rm -f "${UBUNTU_IMAGE_PATH}" "${sha256_file}"
+            exit 1
+        fi
 
-        if [[ -z "${expected_checksum}" ]]; then
+        if [[ -z "${actual_checksum}" ]]; then
+            log "ERROR: Calculated SHA256 checksum is empty for ${UBUNTU_IMAGE_PATH}"
+            log "ERROR: The downloaded image may be corrupted, unreadable, or missing"
+            rm -f "${UBUNTU_IMAGE_PATH}" "${sha256_file}"
+            exit 1
+        fi
             log "ERROR: Could not find checksum for $(basename "${UBUNTU_IMAGE_FILE}") in SHA256SUMS"
             log "ERROR: Downloaded image may be compromised or incorrect"
             rm -f "${UBUNTU_IMAGE_PATH}" "${sha256_file}"
