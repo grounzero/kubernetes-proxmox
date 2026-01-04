@@ -735,7 +735,7 @@ validate_k8s_version() {
 
     if [[ ! "${normalized_k8s_version}" =~ $k8s_version_pattern ]]; then
         log "ERROR: Invalid Kubernetes version format: ${K8S_SEMVER}"
-        log "ERROR: Expected a version like '1.35.0', 'v1.35.0', '1.35.0-rc.1', 'v1.35.0-alpha.2', '1.35.0-alpha.2.3', or '1.35.0-rc.1.commit.abc123'"
+        log "ERROR: Expected format: X.Y.Z or vX.Y.Z, optionally with a pre-release suffix (e.g. '-rc.1' or '-alpha.2.3')"
         exit 1
     fi
 
