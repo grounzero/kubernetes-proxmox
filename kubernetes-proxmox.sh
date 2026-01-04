@@ -83,8 +83,8 @@ cleanup_previous_run() {
         fi
 
         # SSH in and kill helper processes
-        ssh -i "${VM_SSH_KEY_PATH}" -o ConnectTimeout=2 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            "${VM_USER}@${ip}" "sudo pkill -f 'while fuser' 2>/dev/null || true; sudo pkill -f apt_news.py 2>/dev/null || true; sudo pkill -f esm_cache.py 2>/dev/null || true" \
+        ssh_vm_opts "${ip}" "-o ConnectTimeout=2" \
+            "sudo pkill -f 'while fuser' 2>/dev/null || true; sudo pkill -f apt_news.py 2>/dev/null || true; sudo pkill -f esm_cache.py 2>/dev/null || true" \
             2>/dev/null || true
     done
 
@@ -307,6 +307,30 @@ ip_add_octet() {
     local base="$1" start_octet="$2" index="$3"
     local octet=$(( start_octet + index ))
     echo "${base}${octet}"
+}
+
+# Helper function to run SSH commands with standard options
+# Usage: ssh_vm <ip> [command...]
+# For custom SSH options, use: ssh_vm_opts <ip> "<ssh_options>" [command...]
+ssh_vm() {
+    local target="$1"
+    shift
+    ssh -i "${VM_SSH_KEY_PATH}" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        "${VM_USER}@${target}" "$@"
+}
+
+# Helper function with custom SSH options
+ssh_vm_opts() {
+    local target="$1"
+    local custom_opts="$2"
+    shift 2
+    ssh -i "${VM_SSH_KEY_PATH}" \
+        ${custom_opts} \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        "${VM_USER}@${target}" "$@"
 }
 
 ############################################
@@ -778,17 +802,16 @@ action_view_status() {
     if pve_has_vmid "${CP_VMID}" && [[ "$(get_vm_status ${CP_VMID})" == "running" ]]; then
         echo ""
         echo "=== Kubernetes Cluster Status ==="
-        if ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
-               -i "${VM_SSH_KEY_PATH}" "${VM_USER}@${CP_IP}" "kubectl get nodes" >/dev/null 2>&1; then
+        if ssh -o BatchMode=yes -o ConnectTimeout=5 -i "${VM_SSH_KEY_PATH}" \
+               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+               "${VM_USER}@${CP_IP}" "kubectl get nodes" >/dev/null 2>&1; then
             echo ""
             echo "Nodes:"
-            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                -i "${VM_SSH_KEY_PATH}" "${VM_USER}@${CP_IP}" "kubectl get nodes -o wide" 2>/dev/null || echo "  Unable to get nodes"
+            ssh_vm "${CP_IP}" "kubectl get nodes -o wide" 2>/dev/null || echo "  Unable to get nodes"
 
             echo ""
             echo "System Pods:"
-            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-                -i "${VM_SSH_KEY_PATH}" "${VM_USER}@${CP_IP}" "kubectl get pods -A" 2>/dev/null || echo "  Unable to get pods"
+            ssh_vm "${CP_IP}" "kubectl get pods -A" 2>/dev/null || echo "  Unable to get pods"
         else
             echo "  Kubernetes cluster not accessible (kubectl not available or cluster not initialized)"
         fi
@@ -833,12 +856,12 @@ action_ssh_node() {
         return 0
     elif [[ "${choice}" == "1" ]]; then
         log "Connecting to Control Plane (${CP_IP})..."
-        ssh -i "${VM_SSH_KEY_PATH}" -o StrictHostKeyChecking=no "${VM_USER}@${CP_IP}"
+        ssh_vm "${CP_IP}"
     elif [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 2 && choice < WORKER_COUNT + 2 )); then
         local worker_idx=$((choice - 2))
         local worker_ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${worker_idx}")"
         log "Connecting to Worker$((worker_idx+1)) (${worker_ip})..."
-        ssh -i "${VM_SSH_KEY_PATH}" -o StrictHostKeyChecking=no "${VM_USER}@${worker_ip}"
+        ssh_vm "${worker_ip}"
     else
         log "Invalid choice"
     fi
@@ -2085,8 +2108,7 @@ action_reset_kubernetes() {
     for ((i=0; i<WORKER_COUNT; i++)); do
         local ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
         log "  Resetting worker$((i+1)) (${ip})..."
-        ssh -i "${VM_SSH_KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_USER}@${ip}" \
-            'sudo systemctl stop kubelet 2>/dev/null || true; \
+        ssh_vm "${ip}" 'sudo systemctl stop kubelet 2>/dev/null || true; \
              sudo kubeadm reset -f; \
              sudo rm -rf /etc/cni/net.d/* /var/lib/cni/* /var/lib/kubelet/* /etc/kubernetes/*; \
              sudo iptables -F 2>/dev/null || true; \
@@ -2099,8 +2121,7 @@ action_reset_kubernetes() {
 
     # Reset control plane last
     log "  Resetting control plane (${CP_IP})..."
-    ssh -i "${VM_SSH_KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_USER}@${CP_IP}" \
-        'sudo systemctl stop kubelet 2>/dev/null || true; \
+    ssh_vm "${CP_IP}" 'sudo systemctl stop kubelet 2>/dev/null || true; \
          sudo kubeadm reset -f; \
          sudo rm -rf /etc/cni/net.d/* /var/lib/cni/* /var/lib/kubelet/* /etc/kubernetes/*; \
          sudo iptables -F 2>/dev/null || true; \
@@ -2170,11 +2191,9 @@ action_scale_cluster() {
             for ((i=WORKER_COUNT; i<existing_workers; i++)); do
                 local node_name="worker$((i+1))"
                 log "  Draining ${node_name}..."
-                ssh -i "${VM_SSH_KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_USER}@${CP_IP}" \
-                    "kubectl drain ${node_name} --delete-emptydir-data --force --ignore-daemonsets --timeout=60s" 2>/dev/null || log "    Failed to drain"
+                ssh_vm "${CP_IP}" "kubectl drain ${node_name} --delete-emptydir-data --force --ignore-daemonsets --timeout=60s" 2>/dev/null || log "    Failed to drain"
                 log "  Deleting ${node_name} from cluster..."
-                ssh -i "${VM_SSH_KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${VM_USER}@${CP_IP}" \
-                    "kubectl delete node ${node_name}" 2>/dev/null || log "    Failed to delete"
+                ssh_vm "${CP_IP}" "kubectl delete node ${node_name}" 2>/dev/null || log "    Failed to delete"
             done
         fi
 
