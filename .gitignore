@@ -1,0 +1,10 @@
+# Claude Code artifacts
+.claude/
+
+# Temporary files
+*.md~
+.DS_Store
+
+# Exclude non-project markdown files
+Act as a principal-level Software Securi.md
+Please review my job application materia.md
