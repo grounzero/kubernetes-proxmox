@@ -687,8 +687,15 @@ validate_k8s_version() {
     local normalized_k8s_version="${K8S_SEMVER#v}"
 
     # Basic validation: expect a semantic version like X.Y.Z, optionally with a pre-release suffix
-    # Examples: 1.35.0, v1.35.0, 1.35.0-rc.1, v1.35.0-alpha.2, 1.35.0-alpha.2.3, 1.35.0-rc.1.commit.abc123
-    if [[ ! "${normalized_k8s_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]; then
+    # Supported formats (after stripping optional leading 'v'):
+    #   - 1.35.0
+    #   - 1.35.0-rc.1
+    #   - 1.35.0-alpha.2
+    #   - 1.35.0-alpha.2.3
+    #   - 1.35.0-rc.1.commit.abc123
+    local K8S_VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
+
+    if [[ ! "${normalized_k8s_version}" =~ $K8S_VERSION_PATTERN ]]; then
         log "ERROR: Invalid Kubernetes version format: ${K8S_SEMVER}"
         log "ERROR: Expected a version like '1.35.0', 'v1.35.0', '1.35.0-rc.1', 'v1.35.0-alpha.2', '1.35.0-alpha.2.3', or '1.35.0-rc.1.commit.abc123'"
         exit 1
