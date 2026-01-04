@@ -16,7 +16,7 @@ Kubernetes on Proxmox - Cluster Management Script
 
 OPTIONS:
     -a ACTION    Run in non-interactive mode with specified action
-                 Actions: install, reconfigure, scale, reset, destroy, status, cleanup
+                 Actions: install, reconfigure, scale, reset, destroy, status, cleanup, update-deps, export-kubeconfig
     -h           Show this help message
 
 EXAMPLES:
@@ -24,10 +24,12 @@ EXAMPLES:
     $0
 
     # Non-interactive mode
-    $0 -a install      # Fresh install from scratch
-    $0 -a reconfigure  # Update existing cluster
-    $0 -a status       # View cluster status
-    $0 -a cleanup      # Kill stuck processes
+    $0 -a install       # Fresh install from scratch
+    $0 -a reconfigure   # Update existing cluster
+    $0 -a status        # View cluster status
+    $0 -a cleanup       # Kill stuck processes
+    $0 -a update-deps   # Update packages on all nodes
+    $0 -a export-kubeconfig  # Export kubeconfig for Lens/external access
 
 EOF
 }
@@ -150,17 +152,17 @@ NET_GATEWAY="${NET_GATEWAY:-}"
 NET_DNS="${NET_DNS:-1.1.1.1}"
 CP_IP="${CP_IP:-}"
 WORKER_IP_BASE="${WORKER_IP_BASE:-}"
-WORKER_IP_START_OCTET="${WORKER_IP_START_OCTET:-51}"
+WORKER_IP_START_OCTET="${WORKER_IP_START_OCTET:-61}"
 
 # Function to apply detected network config (called after detection)
 apply_network_defaults() {
     NET_CIDR_PREFIX="${NET_CIDR_PREFIX:-${AUTO_DETECTED_CIDR}}"
     NET_GATEWAY="${NET_GATEWAY:-${AUTO_DETECTED_GATEWAY}}"
-    CP_IP="${CP_IP:-${AUTO_DETECTED_NETWORK_PREFIX}.50}"
+    CP_IP="${CP_IP:-${AUTO_DETECTED_NETWORK_PREFIX}.60}"
     WORKER_IP_BASE="${WORKER_IP_BASE:-${AUTO_DETECTED_NETWORK_PREFIX}.}"
 }
 
-# Ubuntu cloud image (22.04 or 24.04)
+# Ubuntu cloud image
 UBUNTU_RELEASE="24.04"
 UBUNTU_IMAGE_DIR="/var/lib/vz/template/iso"
 UBUNTU_IMAGE_FILE=""
@@ -211,6 +213,12 @@ CLOUD_INIT_TIMEOUT_SECONDS="${CLOUD_INIT_TIMEOUT_SECONDS:-300}"
 MIN_REQUIRED_MEMORY_MB="8192"  # Minimum 8GB for control plane + 2 workers
 MIN_REQUIRED_DISK_GB="100"     # Minimum 100GB free space
 RESOURCE_CHECK_ENABLED="${RESOURCE_CHECK_ENABLED:-true}"  # Set to false to skip checks
+
+# Fresh install flag (internal - set by action_fresh_install to skip IP conflict checks)
+SKIP_IP_CONFLICT_CHECK="${SKIP_IP_CONFLICT_CHECK:-false}"
+
+# Kubeconfig export settings
+KUBECONFIG_EXPORT_DIR="${KUBECONFIG_EXPORT_DIR:-/root/kubeconfigs}"
 
 ############################################
 # INTERNAL HELPERS
@@ -328,10 +336,11 @@ extract_package_section() {
 # Returns: VG name string, or empty string if not found/not LVM storage
 get_storage_vgname() {
     local storage_name="$1"
-    pvesm config "${storage_name}" 2>/dev/null | awk '
-        # Find the line where the first field is "vgname"
+
+    # Try pvesm config first
+    local vg_name
+    vg_name=$(pvesm config "${storage_name}" 2>/dev/null | awk '
         $1 == "vgname" {
-            # Remaining fields may include ":" separators; strip colons
             for (i = 2; i <= NF; i++) {
                 gsub(/:/, "", $i)
                 if ($i != "") {
@@ -340,7 +349,18 @@ get_storage_vgname() {
                 }
             }
         }
-    ' || echo ""
+    ')
+
+    # If that fails, try parsing /etc/pve/storage.cfg directly
+    if [[ -z "${vg_name}" ]] && [[ -f "/etc/pve/storage.cfg" ]]; then
+        vg_name=$(awk -v storage="${storage_name}" '
+            $0 ~ "^(lvmthin|lvm): " storage "$" { in_storage=1; next }
+            in_storage && /^$/ { exit }
+            in_storage && /^\t?vgname/ { print $2; exit }
+        ' /etc/pve/storage.cfg)
+    fi
+
+    echo "${vg_name}"
 }
 
 # Helper function to run SSH commands with standard options
@@ -467,44 +487,48 @@ validate_network_config() {
         ((errors++))
     fi
 
-    # Check for IP conflicts
-    log "Checking for IP conflicts on planned VM addresses..."
+    # Check for IP conflicts (skip if requested, e.g., during fresh install after VM destruction)
     local conflict_found=false
+    if [[ "${SKIP_IP_CONFLICT_CHECK}" == "false" ]]; then
+        log "Checking for IP conflicts on planned VM addresses..."
 
-    # Check control plane IP
-    if ping -c1 -W1 "${CP_IP}" >/dev/null 2>&1; then
-        if ! pve_has_vmid "${CP_VMID}"; then
-            log "WARNING: IP ${CP_IP} is responding but VM ${CP_VMID} doesn't exist"
-            log "WARNING: This may indicate an IP conflict"
-            conflict_found=true
-            ((errors++))
-        fi
-    fi
-
-    # Check worker IPs
-    for ((i=0; i<WORKER_COUNT; i++)); do
-        local worker_ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
-        local worker_vmid=$((WORKER_VMID_START + i))
-
-        if ping -c1 -W1 "${worker_ip}" >/dev/null 2>&1; then
-            if ! pve_has_vmid "${worker_vmid}"; then
-                log "WARNING: IP ${worker_ip} is responding but VM ${worker_vmid} doesn't exist"
+        # Check control plane IP
+        if ping -c1 -W1 "${CP_IP}" >/dev/null 2>&1; then
+            if ! pve_has_vmid "${CP_VMID}"; then
+                log "WARNING: IP ${CP_IP} is responding but VM ${CP_VMID} doesn't exist"
                 log "WARNING: This may indicate an IP conflict"
                 conflict_found=true
                 ((errors++))
             fi
         fi
-    done
 
-    if [[ "${conflict_found}" == "true" && "${MENU_MODE}" == "true" ]]; then
-        echo ""
-        echo "NETWORK WARNING: Potential IP conflicts detected!"
-        echo "Continuing may cause network connectivity issues."
-        echo ""
-        if ! confirm_action "Continue anyway?"; then
-            log "Deployment cancelled due to network conflicts"
-            exit 1
+        # Check worker IPs
+        for ((i=0; i<WORKER_COUNT; i++)); do
+            local worker_ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
+            local worker_vmid=$((WORKER_VMID_START + i))
+
+            if ping -c1 -W1 "${worker_ip}" >/dev/null 2>&1; then
+                if ! pve_has_vmid "${worker_vmid}"; then
+                    log "WARNING: IP ${worker_ip} is responding but VM ${worker_vmid} doesn't exist"
+                    log "WARNING: This may indicate an IP conflict"
+                    conflict_found=true
+                    ((errors++))
+                fi
+            fi
+        done
+
+        if [[ "${conflict_found}" == "true" && "${MENU_MODE}" == "true" ]]; then
+            echo ""
+            echo "NETWORK WARNING: Potential IP conflicts detected!"
+            echo "Continuing may cause network connectivity issues."
+            echo ""
+            if ! confirm_action "Continue anyway?"; then
+                log "Deployment cancelled due to network conflicts"
+                exit 1
+            fi
         fi
+    else
+        log "Skipping IP conflict checks (fresh install mode)"
     fi
 
     if [[ "${errors}" -gt 0 ]]; then
@@ -550,31 +574,30 @@ check_host_resources() {
     # Check available disk space on storage
     local storage_path
     case "${PM_STORAGE}" in
-        "local-lvm")
-            # LVM storage - check VG free space
-            local vg_name
-            vg_name=$(get_storage_vgname "${PM_STORAGE}")
-            if [[ -n "${vg_name}" ]]; then
-                local vg_free_raw
-                if ! vg_free_raw=$(vgs --noheadings --units g -o vg_free "${vg_name}" 2>/dev/null); then
-                    log "WARNING: Failed to determine free space for volume group ${vg_name}; assuming 0GB"
-                    local vg_free_gb=0
-                else
-                    local vg_free_gb
-                    vg_free_gb=$(awk '{sub(/[gG]$/,"",$1); printf "%.0f\n", $1}' <<< "${vg_free_raw}")
-                fi
-                log "  Disk: ${vg_free_gb}GB available on ${PM_STORAGE}"
+        "local-lvm"|"lvmthin")
+            # LVM thin storage - use pvesm status (not VG free space)
+            # Thin pools are pre-allocated, so VG free space is misleading
+            local avail_gb=0
+            local avail_kb
 
-                if [[ "${vg_free_gb}" -lt "${required_disk_gb}" ]]; then
-                    log "ERROR: Insufficient disk space!"
-                    log "ERROR: Available: ${vg_free_gb}GB, Required: ${required_disk_gb}GB"
-                    ((errors++))
-                elif [[ "${vg_free_gb}" -lt $((required_disk_gb + 20)) ]]; then
-                    log "WARNING: Low disk space margin (less than 20GB free after allocation)"
-                    ((warnings++))
-                fi
-            else
+            # Get available space from pvesm status
+            avail_kb=$(pvesm status -storage "${PM_STORAGE}" 2>/dev/null | grep "${PM_STORAGE}" | awk '{print $6}')
+            if [[ -n "${avail_kb}" ]] && [[ "${avail_kb}" =~ ^[0-9]+$ ]]; then
+                avail_gb=$((avail_kb / 1024 / 1024))
+            fi
+
+            log "  Disk: ${avail_gb}GB available on ${PM_STORAGE}"
+
+            if [[ "${avail_gb}" -eq 0 ]]; then
                 log "WARNING: Could not determine disk space for ${PM_STORAGE}"
+                log "WARNING: Skipping disk space check (continuing anyway)"
+                ((warnings++))
+            elif [[ "${avail_gb}" -lt "${required_disk_gb}" ]]; then
+                log "ERROR: Insufficient disk space!"
+                log "ERROR: Available: ${avail_gb}GB, Required: ${required_disk_gb}GB"
+                ((errors++))
+            elif [[ "${avail_gb}" -lt $((required_disk_gb + 20)) ]]; then
+                log "WARNING: Low disk space margin (less than 20GB free after allocation)"
                 ((warnings++))
             fi
             ;;
@@ -838,6 +861,8 @@ show_menu() {
     echo "  7) Kill Stuck Processes (Cleanup ansible/apt processes)"
     echo "  8) View Status (Show detailed cluster information)"
     echo "  9) SSH to Node (Quick SSH access)"
+    echo " 10) Update Dependencies (Update packages on all nodes)"
+    echo " 11) Export Kubeconfig (For Lens/external kubectl access)"
     echo "  0) Exit"
     echo ""
     echo "============================================================================"
@@ -846,7 +871,7 @@ show_menu() {
 
 read_choice() {
     local choice
-    read -p "Enter choice [0-9]: " choice
+    read -p "Enter choice [0-11]: " choice
     echo "${choice}"
 }
 
@@ -949,6 +974,205 @@ action_ssh_node() {
     else
         log "Invalid choice"
     fi
+}
+
+action_update_dependencies() {
+    log "Updating packages on all nodes..."
+
+    # Check if VMs are running
+    if ! pve_has_vmid "${CP_VMID}" || [[ "$(get_vm_status ${CP_VMID})" != "running" ]]; then
+        log "ERROR: Control plane VM is not running"
+        return 1
+    fi
+
+    echo ""
+    echo "This will update all packages (apt update && apt upgrade) on:"
+    echo "  - Control Plane (${CP_IP})"
+    for ((i=0; i<WORKER_COUNT; i++)); do
+        ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
+        echo "  - Worker$((i+1)) (${ip})"
+    done
+    echo ""
+
+    if ! confirm_action "Proceed with package updates?"; then
+        log "Update cancelled"
+        return 0
+    fi
+
+    # Update control plane
+    log "Updating control plane packages..."
+    if ssh_vm "${CP_IP}" "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"; then
+        log "Control plane updated successfully"
+    else
+        log "ERROR: Failed to update control plane"
+        return 1
+    fi
+
+    # Update workers
+    for ((i=0; i<WORKER_COUNT; i++)); do
+        local worker_ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
+        local worker_vmid=$((WORKER_VMID_START + i))
+
+        if ! pve_has_vmid "${worker_vmid}" || [[ "$(get_vm_status ${worker_vmid})" != "running" ]]; then
+            log "WARNING: Worker$((i+1)) (${worker_vmid}) is not running - skipping"
+            continue
+        fi
+
+        log "Updating Worker$((i+1)) packages..."
+        if ssh_vm "${worker_ip}" "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y"; then
+            log "Worker$((i+1)) updated successfully"
+        else
+            log "ERROR: Failed to update Worker$((i+1))"
+        fi
+    done
+
+    log "Package updates complete"
+    echo ""
+    echo "Note: You may need to reboot nodes if kernel updates were installed"
+    echo "Use option 6 (Power Management) to restart VMs if needed"
+}
+
+action_export_kubeconfig() {
+    log "Exporting kubeconfig for external access..."
+
+    # Check if control plane is running
+    if ! pve_has_vmid "${CP_VMID}" || [[ "$(get_vm_status ${CP_VMID})" != "running" ]]; then
+        log "ERROR: Control plane VM is not running"
+        return 1
+    fi
+
+    # Check if cluster is initialized
+    if ! ssh -o BatchMode=yes -o ConnectTimeout=5 -i "${VM_SSH_KEY_PATH}" \
+           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+           "${VM_USER}@${CP_IP}" "test -f /etc/kubernetes/admin.conf" 2>/dev/null; then
+        log "ERROR: Kubernetes cluster not initialized (admin.conf not found)"
+        return 1
+    fi
+
+    # Create export directory
+    mkdir -p "${KUBECONFIG_EXPORT_DIR}"
+
+    # Generate timestamp for filename
+    local timestamp=$(date +%Y%m%d-%H%M%S)
+    local kubeconfig_file="${KUBECONFIG_EXPORT_DIR}/kubeconfig-${timestamp}.yaml"
+    local kubeconfig_latest="${KUBECONFIG_EXPORT_DIR}/kubeconfig-latest.yaml"
+
+    echo ""
+    echo "Export Options:"
+    echo "  1) Export with control plane IP (${CP_IP}) - for local network access"
+    echo "  2) Export with custom hostname/IP - for remote access or DNS name"
+    echo "  0) Cancel"
+    echo ""
+
+    local export_choice
+    read -p "Enter choice: " export_choice
+
+    local api_server_address="${CP_IP}"
+
+    case "${export_choice}" in
+        1)
+            api_server_address="${CP_IP}"
+            ;;
+        2)
+            echo ""
+            echo "Enter the hostname or IP address to use for the API server."
+            echo "This should be reachable from where you will use kubectl/Lens."
+            echo "Examples: k8s.example.com, 192.168.1.100, my-cluster.local"
+            echo ""
+            read -p "API Server address: " custom_address
+            if [[ -z "${custom_address}" ]]; then
+                log "ERROR: No address provided"
+                return 1
+            fi
+            api_server_address="${custom_address}"
+            ;;
+        0)
+            log "Export cancelled"
+            return 0
+            ;;
+        *)
+            log "Invalid choice"
+            return 1
+            ;;
+    esac
+
+    log "Fetching kubeconfig from control plane..."
+
+    # Fetch the admin.conf from control plane
+    local raw_kubeconfig
+    raw_kubeconfig=$(ssh_vm "${CP_IP}" "sudo cat /etc/kubernetes/admin.conf" 2>/dev/null)
+
+    if [[ -z "${raw_kubeconfig}" ]]; then
+        log "ERROR: Failed to fetch kubeconfig from control plane"
+        return 1
+    fi
+
+    # Replace the API server address
+    local modified_kubeconfig
+    modified_kubeconfig=$(echo "${raw_kubeconfig}" | sed "s|server: https://[^:]*:6443|server: https://${api_server_address}:6443|g")
+
+    # Update cluster name and context for clarity
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes|name: proxmox-k8s|g")
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|cluster: kubernetes|cluster: proxmox-k8s|g")
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|context: kubernetes-admin@kubernetes|context: admin@proxmox-k8s|g")
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|current-context: kubernetes-admin@kubernetes|current-context: admin@proxmox-k8s|g")
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|user: kubernetes-admin|user: admin|g")
+
+    # Write to timestamped file
+    echo "${modified_kubeconfig}" > "${kubeconfig_file}"
+    chmod 600 "${kubeconfig_file}"
+
+    # Update the latest symlink
+    ln -sf "$(basename "${kubeconfig_file}")" "${kubeconfig_latest}"
+
+    log "============================================================================"
+    log "Kubeconfig exported successfully!"
+    log "============================================================================"
+    echo ""
+    echo "Files created:"
+    echo "  ${kubeconfig_file}"
+    echo "  ${kubeconfig_latest} (symlink to latest)"
+    echo ""
+    echo "API Server: https://${api_server_address}:6443"
+    echo ""
+    echo "Usage Options:"
+    echo ""
+    echo "1. For Lens:"
+    echo "   - Open Lens"
+    echo "   - Click Add Cluster or +"
+    echo "   - Select Add from kubeconfig"
+    echo "   - Paste contents or browse to: ${kubeconfig_file}"
+    echo ""
+    echo "2. For kubectl (temporary):"
+    echo "   export KUBECONFIG=${kubeconfig_file}"
+    echo "   kubectl get nodes"
+    echo ""
+    echo "3. For kubectl (permanent - merge with existing):"
+    echo "   KUBECONFIG=~/.kube/config:${kubeconfig_file} kubectl config view --flatten > ~/.kube/config.new"
+    echo "   mv ~/.kube/config.new ~/.kube/config"
+    echo "   kubectl config use-context admin@proxmox-k8s"
+    echo ""
+    echo "4. Copy to local machine:"
+    echo "   scp root@\$(hostname -I | awk '{print \$1}'):${kubeconfig_file} ~/.kube/proxmox-k8s.yaml"
+    echo ""
+
+    # Verify the kubeconfig works
+    if [[ "${MENU_MODE}" == "true" ]]; then
+        echo ""
+        if confirm_action "Test the kubeconfig now?"; then
+            log "Testing kubeconfig..."
+            if KUBECONFIG="${kubeconfig_file}" kubectl cluster-info --request-timeout=10s 2>/dev/null; then
+                echo ""
+                log "[OK] Kubeconfig is valid and cluster is accessible"
+            else
+                echo ""
+                log "WARNING: Could not connect to cluster using the exported kubeconfig"
+                log "This may be expected if testing from a different network"
+            fi
+        fi
+    fi
+
+    log "============================================================================"
 }
 
 action_power_management() {
@@ -2089,8 +2313,18 @@ action_fresh_install() {
         rm -rf "${ANSIBLE_DIR}"
     fi
 
+    # Flush ARP cache to prevent IP conflict warnings from stale entries
+    log "Flushing ARP cache..."
+    if command -v ip >/dev/null 2>&1; then
+        ip -s -s neigh flush all >/dev/null 2>&1 || true
+    fi
+    sleep 2  # Give ARP cache time to clear
+
     log "VMs destroyed. Starting fresh deployment..."
+    # Set flag to skip IP conflict checks since we just destroyed the VMs
+    SKIP_IP_CONFLICT_CHECK="true"
     action_reconfigure
+    SKIP_IP_CONFLICT_CHECK="false"  # Reset for future operations
 }
 
 action_destroy_cluster() {
@@ -2325,6 +2559,8 @@ if [[ "${MENU_MODE}" == "false" ]]; then
         destroy) action_destroy_cluster ;;
         status) action_view_status ;;
         cleanup) action_kill_processes ;;
+        update-deps) action_update_dependencies ;;
+        export-kubeconfig) action_export_kubeconfig ;;
         *) log "ERROR: Unknown action '${CHOSEN_ACTION}'"; show_help; exit 1 ;;
     esac
     exit 0
@@ -2351,6 +2587,8 @@ while true; do
         7) action_kill_processes ;;
         8) action_view_status ;;
         9) action_ssh_node ;;
+        10) action_update_dependencies ;;
+        11) action_export_kubeconfig ;;
         0) log "Exiting..."; exit 0 ;;
         *) echo "Invalid choice. Press Enter to continue..."; read ;;
     esac
