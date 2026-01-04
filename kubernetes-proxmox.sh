@@ -651,7 +651,7 @@ validate_k8s_version() {
     # Check if kubeadm package exists with our version
     if echo "${package_info}" | grep -q "Package: kubeadm"; then
         if echo "${package_info}" | grep -A5 "Package: kubeadm" | grep -q "Version:.*${version_pattern}"; then
-            log "✓ Kubernetes version ${K8S_SEMVER} found in repository"
+            log "[OK] Kubernetes version ${K8S_SEMVER} found in repository"
         else
             log "ERROR: Kubernetes version ${K8S_SEMVER} not found in repository"
             log "ERROR: The specified version may not exist or may be misspelled"
@@ -1043,7 +1043,7 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
             exit 1
         fi
 
-        log "✓ SHA256 checksum verification passed"
+        log "[OK] SHA256 checksum verification passed"
         rm -f "${sha256_file}"
     else
         log "WARNING: Could not download SHA256SUMS file"
@@ -1299,7 +1299,7 @@ for node_ip in "${CP_IP}" "${WORKER_IPS[@]}"; do
            -o ConnectTimeout=10 \
            "${VM_USER}@${node_ip}" \
            "timeout 300 cloud-init status --wait" 2>/dev/null; then
-        log "  ✓ Cloud-init completed on ${node_ip}"
+        log "  [OK] Cloud-init completed on ${node_ip}"
     else
         log "WARNING: cloud-init status check failed on ${node_ip}"
         log "WARNING: This may cause configuration issues"
