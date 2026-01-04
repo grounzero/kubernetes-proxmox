@@ -524,7 +524,21 @@ check_host_resources() {
             #   "vgname pve"
             #   "vgname: pve"
             #   "vgname : pve extra"
-            vg_name=$(pvesm config "${PM_STORAGE}" 2>/dev/null | awk '$1 == "vgname" { for (i = 2; i <= NF; i++) { if ($i != ":") { gsub(/:$/, "", $i); print $i; exit } } }' || echo "")
+            vg_name=$(
+                pvesm config "${PM_STORAGE}" 2>/dev/null | awk '
+                    # Find the line where the first field is "vgname"
+                    $1 == "vgname" {
+                        # Remaining fields may include ":" separators; strip colons
+                        for (i = 2; i <= NF; i++) {
+                            gsub(/:/, "", $i)
+                            if ($i != "") {
+                                print $i
+                                exit
+                            }
+                        }
+                    }
+                ' || echo ""
+            )
             if [[ -n "${vg_name}" ]]; then
                 local vg_free_raw
                 if ! vg_free_raw=$(vgs --noheadings --units g -o vg_free "${vg_name}" 2>/dev/null); then
