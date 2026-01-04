@@ -388,7 +388,13 @@ ensure_ssh_keys() {
 
         # Verify key permissions (cross-platform stat command)
         local key_perms=""
-        if ! { key_perms=$(stat -c '%a' "${VM_SSH_KEY_PATH}" 2>/dev/null) || key_perms=$(stat -f '%OLp' "${VM_SSH_KEY_PATH}" 2>/dev/null); }; then
+        if key_perms=$(stat -c '%a' "${VM_SSH_KEY_PATH}" 2>/dev/null); then
+            # GNU stat format (Linux)
+            :
+        elif key_perms=$(stat -f '%OLp' "${VM_SSH_KEY_PATH}" 2>/dev/null); then
+            # BSD stat format (macOS)
+            :
+        else
             log "WARNING: Unable to determine SSH key permissions. Forcing permissions to 600..."
             chmod 600 "${VM_SSH_KEY_PATH}"
             return
@@ -506,6 +512,9 @@ check_host_resources() {
         "local-lvm")
             # LVM storage - check VG free space
             local vg_name
+            # Extract vgname value from 'pvesm config' output
+            # Format: "  vgname: pve" -> extract "pve"
+            # Match lines with 'vgname' as key, trim whitespace from value
             vg_name=$(pvesm config "${PM_STORAGE}" 2>/dev/null | awk -F':' '$1 ~ /^[[:space:]]*vgname[[:space:]]*$/ {gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2}' || echo "")
             if [[ -n "${vg_name}" ]]; then
                 local vg_free_gb=$(vgs --noheadings --units g -o vg_free "${vg_name}" 2>/dev/null | awk '{sub(/g$/,"",$1); print int($1)}' || echo "0")
@@ -669,10 +678,10 @@ validate_k8s_version() {
     local normalized_k8s_version="${K8S_SEMVER#v}"
 
     # Basic validation: expect a semantic version like X.Y.Z, optionally with a pre-release suffix
-    # Examples: 1.35.0, v1.35.0, 1.35.0-rc1, v1.35.0-alpha2
-    if [[ ! "${normalized_k8s_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)[0-9]+)?$ ]]; then
+    # Examples: 1.35.0, v1.35.0, 1.35.0-rc.1, v1.35.0-alpha.2
+    if [[ ! "${normalized_k8s_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
         log "ERROR: Invalid Kubernetes version format: ${K8S_SEMVER}"
-        log "ERROR: Expected a version like '1.35.0', 'v1.35.0', '1.35.0-rc1', or 'v1.35.0-alpha1'"
+        log "ERROR: Expected a version like '1.35.0', 'v1.35.0', '1.35.0-rc.1', or 'v1.35.0-alpha.2'"
         exit 1
     fi
 
@@ -1055,7 +1064,7 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
         # Extract only the checksum for our specific file (match filename from URL as in SHA256SUMS)
         local image_filename="${UBUNTU_IMAGE_URL##*/}"
         local expected_checksum
-        expected_checksum=$(awk -v f="${image_filename}" '$2 == "*" f {print $1}' "${sha256_file}")
+        expected_checksum=$(awk -v f="${image_filename}" '$2 == "*"f {print $1}' "${sha256_file}")
 
         if [[ -z "${expected_checksum}" ]]; then
             log "ERROR: Could not find checksum for ${image_filename} in SHA256SUMS"
