@@ -647,18 +647,10 @@ validate_k8s_version() {
     fi
 
     local version_pattern="${normalized_k8s_version}-"
-            local kubeadm_block
-            kubeadm_block=$(echo "${package_info}" | grep -A2 "Package: kubeadm" || true)
 
-            local version_lines
-            version_lines=$(echo "${kubeadm_block}" | grep "Version:" | head -5 || true)
-
-            local available_versions
-            if [[ -n "${version_lines}" ]]; then
-                available_versions=$(echo "${version_lines}" | sed 's/Version: /  - /')
-            else
-                available_versions="  (could not list versions)"
-            fi
+    # Check if kubeadm package exists with our version
+    if echo "${package_info}" | grep -q "Package: kubeadm"; then
+        if echo "${package_info}" | grep -A5 "Package: kubeadm" | grep -q "Version:.*${version_pattern}"; then
             log "✓ Kubernetes version ${K8S_SEMVER} found in repository"
         else
             log "ERROR: Kubernetes version ${K8S_SEMVER} not found in repository"
@@ -1008,16 +1000,25 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
     log "Downloading Ubuntu ${UBUNTU_RELEASE}..."
     curl -fsSL -o "${UBUNTU_IMAGE_PATH}" "${UBUNTU_IMAGE_URL}"
 
-        local expected_checksum=$(grep "$(basename "${UBUNTU_IMAGE_PATH}")" "${sha256_file}" | awk '{print $1}')
-
-        if [[ -z "${expected_checksum}" ]]; then
-            log "ERROR: Could not find checksum for $(basename "${UBUNTU_IMAGE_PATH}") in SHA256SUMS"
+    # Download SHA256SUMS file for verification
+    log "Downloading SHA256 checksums..."
+    local sha256_url="${UBUNTU_IMAGE_URL%/*}/SHA256SUMS"
+    local sha256_file="${UBUNTU_IMAGE_PATH}.sha256"
 
     if curl -fsSL -o "${sha256_file}" "${sha256_url}"; then
         log "Verifying image integrity..."
 
         # Extract only the checksum for our specific file
         local expected_checksum=$(grep "$(basename "${UBUNTU_IMAGE_FILE}")" "${sha256_file}" | awk '{print $1}')
+
+        if [[ -z "${expected_checksum}" ]]; then
+            log "ERROR: Could not find checksum for $(basename "${UBUNTU_IMAGE_FILE}") in SHA256SUMS"
+            log "ERROR: Downloaded image may be compromised or incorrect"
+            rm -f "${UBUNTU_IMAGE_PATH}" "${sha256_file}"
+            exit 1
+        fi
+
+        # Calculate actual checksum
         local actual_checksum
         if ! actual_checksum=$(sha256sum "${UBUNTU_IMAGE_PATH}" | awk '{print $1}'); then
             log "ERROR: Failed to calculate SHA256 checksum for ${UBUNTU_IMAGE_PATH}"
@@ -1032,14 +1033,6 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
             rm -f "${UBUNTU_IMAGE_PATH}" "${sha256_file}"
             exit 1
         fi
-            log "ERROR: Could not find checksum for $(basename "${UBUNTU_IMAGE_FILE}") in SHA256SUMS"
-            log "ERROR: Downloaded image may be compromised or incorrect"
-            rm -f "${UBUNTU_IMAGE_PATH}" "${sha256_file}"
-            exit 1
-        fi
-
-        # Calculate actual checksum
-        local actual_checksum=$(sha256sum "${UBUNTU_IMAGE_PATH}" | awk '{print $1}')
 
         if [[ "${actual_checksum}" != "${expected_checksum}" ]]; then
             log "ERROR: SHA256 checksum verification FAILED!"
