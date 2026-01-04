@@ -1073,7 +1073,7 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
         # Extract only the checksum for our specific file (match filename from URL as in SHA256SUMS)
         local image_filename="${UBUNTU_IMAGE_URL##*/}"
         local expected_checksum
-        expected_checksum=$(awk -v f="${image_filename}" '$2 == "*"f {print $1}' "${sha256_file}")
+        expected_checksum=$(awk -v f="${image_filename}" '{name = $NF; sub(/^\*/, "", name); if (name == f) print $1}' "${sha256_file}")
 
         if [[ -z "${expected_checksum}" ]]; then
             log "ERROR: Could not find checksum for ${image_filename} in SHA256SUMS"
