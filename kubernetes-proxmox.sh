@@ -323,6 +323,26 @@ extract_package_section() {
     ' <<< "${package_data}"
 }
 
+# Extract VG name from Proxmox storage configuration
+# Usage: get_storage_vgname "storage-name"
+# Returns: VG name string, or empty string if not found/not LVM storage
+get_storage_vgname() {
+    local storage_name="$1"
+    pvesm config "${storage_name}" 2>/dev/null | awk '
+        # Find the line where the first field is "vgname"
+        $1 == "vgname" {
+            # Remaining fields may include ":" separators; strip colons
+            for (i = 2; i <= NF; i++) {
+                gsub(/:/, "", $i)
+                if ($i != "") {
+                    print $i
+                    exit
+                }
+            }
+        }
+    ' || echo ""
+}
+
 # Helper function to run SSH commands with standard options
 # Usage: ssh_vm <ip> [command...]
 # For custom SSH options, use: ssh_vm_opts <ip> "<ssh_options>" [command...]
@@ -533,26 +553,7 @@ check_host_resources() {
         "local-lvm")
             # LVM storage - check VG free space
             local vg_name
-            # Extract vgname value from 'pvesm config' output
-            # Handles formats like:
-            #   "vgname pve"
-            #   "vgname: pve"
-            #   "vgname : pve extra"
-            vg_name=$(
-                pvesm config "${PM_STORAGE}" 2>/dev/null | awk '
-                    # Find the line where the first field is "vgname"
-                    $1 == "vgname" {
-                        # Remaining fields may include ":" separators; strip colons
-                        for (i = 2; i <= NF; i++) {
-                            gsub(/:/, "", $i)
-                            if ($i != "") {
-                                print $i
-                                exit
-                            }
-                        }
-                    }
-                ' || echo ""
-            )
+            vg_name=$(get_storage_vgname "${PM_STORAGE}")
             if [[ -n "${vg_name}" ]]; then
                 local vg_free_raw
                 if ! vg_free_raw=$(vgs --noheadings --units g -o vg_free "${vg_name}" 2>/dev/null); then
