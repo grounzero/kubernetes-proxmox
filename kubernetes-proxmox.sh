@@ -727,7 +727,8 @@ validate_k8s_version() {
     #   - 1.35.0-alpha.2
     #   - 1.35.0-alpha.2.3
     #   - 1.35.0-rc.1.commit.abc123
-    # Pattern allows alphanumerics (0-9, A-Z, a-z) in pre-release identifiers, no underscores
+    # Pattern: pre-release section starts with '-' followed by dot-separated alphanumeric identifiers
+    # Each identifier contains only alphanumerics (0-9, A-Z, a-z); no underscores or hyphens within
     local K8S_VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
 
     if [[ ! "${normalized_k8s_version}" =~ $K8S_VERSION_PATTERN ]]; then
@@ -1117,7 +1118,7 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
         # The asterisk (*) indicates binary mode in checksum files (vs space for text mode)
         local image_filename="${UBUNTU_IMAGE_URL##*/}"
         local expected_checksum
-        expected_checksum=$(awk -v f="${image_filename}" '{name = $2; sub(/^\*/, "", name); if (name == f) print $1}' "${sha256_file}")
+        expected_checksum=$(awk -v f="${image_filename}" '{name = $2; sub(/^\*/, "", name); if (name == f) { print $1; exit }}' "${sha256_file}")
 
         if [[ -z "${expected_checksum}" ]]; then
             log "ERROR: Could not find checksum for ${image_filename} in SHA256SUMS"
