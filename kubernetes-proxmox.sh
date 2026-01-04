@@ -1776,7 +1776,7 @@ cat > "${ANSIBLE_PLAYBOOK}" <<\EOF
   gather_facts: true
   tasks:
     - name: Wait for cloud-init to complete
-      command: timeout {{ cloud_init_timeout | default(600) }} cloud-init status --wait
+      command: timeout {{ cloud_init_timeout | default(300) }} cloud-init status --wait
       changed_when: false
       failed_when: false
 
