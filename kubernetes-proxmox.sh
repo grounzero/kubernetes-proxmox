@@ -526,7 +526,14 @@ check_host_resources() {
             #   "vgname : pve extra"
             vg_name=$(pvesm config "${PM_STORAGE}" 2>/dev/null | awk '$1 == "vgname" { for (i = 2; i <= NF; i++) { if ($i != ":") { gsub(/:$/, "", $i); print $i; exit } } }' || echo "")
             if [[ -n "${vg_name}" ]]; then
-                local vg_free_gb=$(vgs --noheadings --units g -o vg_free "${vg_name}" 2>/dev/null | awk '{sub(/g$/,"",$1); print int($1)}' || echo "0")
+                local vg_free_raw
+                if ! vg_free_raw=$(vgs --noheadings --units g -o vg_free "${vg_name}" 2>/dev/null); then
+                    log "WARNING: Failed to determine free space for volume group ${vg_name}; assuming 0GB"
+                    local vg_free_gb=0
+                else
+                    local vg_free_gb
+                    vg_free_gb=$(awk '{sub(/g$/,"",$1); print int($1)}' <<< "${vg_free_raw}")
+                fi
                 log "  Disk: ${vg_free_gb}GB available on ${PM_STORAGE}"
 
                 if [[ "${vg_free_gb}" -lt "${required_disk_gb}" ]]; then
