@@ -362,12 +362,20 @@ ensure_ssh_keys() {
         fi
 
         log "Creating SSH key pair..."
-        ssh-keygen -t ed25519 -f "${VM_SSH_KEY_PATH}" -N "" -C "proxmox-k8s-automation"
-
-        if [[ $? -ne 0 ]]; then
-            log "ERROR: Failed to create SSH key"
-            exit 1
-        fi
+        ssh-keygen -t ed25519 -f "${VM_SSH_KEY_PATH}" -N "" -C "proxmox-k8s-automation" || {
+            local exit_code=$?
+            log "ERROR: Failed to create SSH key at ${VM_SSH_KEY_PATH} (ssh-keygen exit code: ${exit_code})"
+            log "       Common causes include:"
+            log "         - ssh-keygen is not installed or not found in \$PATH"
+            log "         - Insufficient permissions to write to $(dirname "${VM_SSH_KEY_PATH}")"
+            log "         - The target directory does not exist"
+            log "         - Low or exhausted disk space on the filesystem"
+            log "       Troubleshooting steps:"
+            log "         - Verify ssh-keygen is installed (e.g., 'ssh-keygen -V' or 'which ssh-keygen')"
+            log "         - Check that $(dirname "${VM_SSH_KEY_PATH}") exists and is writable by the current user"
+            log "         - Ensure there is sufficient free disk space"
+            exit "${exit_code}"
+        }
 
         log "SSH key created successfully"
         log "Public key: ${VM_SSH_PUBKEY_PATH}"
@@ -378,11 +386,13 @@ ensure_ssh_keys() {
     else
         log "SSH key found at ${VM_SSH_KEY_PATH}"
 
-        # Verify key permissions
+        # Verify key permissions (cross-platform stat command)
         local key_perms=""
         if key_perms=$(stat -c '%a' "${VM_SSH_KEY_PATH}" 2>/dev/null); then
+            # Permissions successfully retrieved using GNU stat (%a format)
             :
         elif key_perms=$(stat -f '%OLp' "${VM_SSH_KEY_PATH}" 2>/dev/null); then
+            # Permissions successfully retrieved using BSD stat (%OLp format)
             :
         else
             log "WARNING: Unable to determine SSH key permissions. Forcing permissions to 600..."
@@ -503,7 +513,7 @@ check_host_resources() {
             # LVM storage - check VG free space
             storage_path=$(pvesm status | grep "^${PM_STORAGE}" | awk '{print $2}' || echo "")
             if [[ -n "${storage_path}" ]]; then
-                local vg_free_gb=$(vgs --noheadings --units g -o vg_free "${storage_path}" 2>/dev/null | tr -d 'g' | awk '{print int($1)}' || echo "0")
+                local vg_free_gb=$(vgs --noheadings --units g -o vg_free "${storage_path}" 2>/dev/null | awk '{sub(/g$/,"",$1); print int($1)}' || echo "0")
                 log "  Disk: ${vg_free_gb}GB available on ${PM_STORAGE}"
 
                 if [[ "${vg_free_gb}" -lt "${required_disk_gb}" ]]; then
@@ -663,10 +673,11 @@ validate_k8s_version() {
     # Normalize K8S_SEMVER to handle both "v1.35.0" and "1.35.0" formats
     local normalized_k8s_version="${K8S_SEMVER#v}"
 
-    # Basic validation: expect a semantic version like X.Y.Z
-    if [[ ! "${normalized_k8s_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    # Basic validation: expect a semantic version like X.Y.Z, optionally with a pre-release suffix
+    # Examples: 1.35.0, v1.35.0, 1.35.0-rc1, v1.35.0-alpha2
+    if [[ ! "${normalized_k8s_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)[0-9]+)?$ ]]; then
         log "ERROR: Invalid Kubernetes version format: ${K8S_SEMVER}"
-        log "ERROR: Expected a version like '1.35.0' or 'v1.35.0'"
+        log "ERROR: Expected a version like '1.35.0', 'v1.35.0', '1.35.0-rc1', or 'v1.35.0-alpha1'"
         exit 1
     fi
 
@@ -715,8 +726,14 @@ validate_k8s_version() {
 get_vm_status() {
     local vmid=$1
     if pve_has_vmid "${vmid}"; then
-        local status=$(qm status "${vmid}" 2>/dev/null | awk '{print $2}')
-        echo "${status:-unknown}"
+        # Use grep to extract status without relying on field positions
+        if qm status "${vmid}" 2>/dev/null | grep -qi 'stopped'; then
+            echo "stopped"
+        elif qm status "${vmid}" 2>/dev/null | grep -qi 'running'; then
+            echo "running"
+        else
+            echo "unknown"
+        fi
     else
         echo "not found"
     fi
@@ -1031,11 +1048,13 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
     if curl -fsSL -o "${sha256_file}" "${sha256_url}"; then
         log "Verifying image integrity..."
 
-        # Extract only the checksum for our specific file
-        local expected_checksum=$(grep "$(basename "${UBUNTU_IMAGE_FILE}")" "${sha256_file}" | awk '{print $1}')
+        # Extract only the checksum for our specific file (match filename from URL as in SHA256SUMS)
+        local image_filename="${UBUNTU_IMAGE_URL##*/}"
+        local expected_checksum
+        expected_checksum=$(awk -v f="${image_filename}" '$2 == "*"f || $2 == f {print $1}' "${sha256_file}")
 
         if [[ -z "${expected_checksum}" ]]; then
-            log "ERROR: Could not find checksum for $(basename "${UBUNTU_IMAGE_FILE}") in SHA256SUMS"
+            log "ERROR: Could not find checksum for ${image_filename} in SHA256SUMS"
             log "ERROR: Downloaded image may be compromised or incorrect"
             rm -f "${UBUNTU_IMAGE_PATH}" "${sha256_file}"
             exit 1
@@ -1973,9 +1992,8 @@ action_fresh_install() {
         if pve_has_vmid "${vmid}"; then
             log "  Stopping VM ${vmid}..."
             if ! qm_output=$(qm stop "${vmid}" 2>&1); then
-                # VM might already be stopped, check status
-                local vm_status=$(qm status "${vmid}" 2>/dev/null | awk '{print $2}')
-                if [[ "${vm_status}" == "stopped" ]]; then
+                # VM might already be stopped, check status without relying on field positions
+                if qm status "${vmid}" 2>/dev/null | grep -qi 'stopped'; then
                     log "    VM ${vmid} already stopped"
                 else
                     log "    WARNING: Failed to stop VM ${vmid}: ${qm_output}"
@@ -2040,8 +2058,8 @@ action_destroy_cluster() {
         if pve_has_vmid "${vmid}"; then
             log "  Stopping VM ${vmid}..."
             if ! qm_output=$(qm stop "${vmid}" 2>&1); then
-                local vm_status=$(qm status "${vmid}" 2>/dev/null | awk '{print $2}')
-                if [[ "${vm_status}" == "stopped" ]]; then
+                # VM might already be stopped, check status without relying on field positions
+                if qm status "${vmid}" 2>/dev/null | grep -qi 'stopped'; then
                     log "    VM ${vmid} already stopped"
                 else
                     log "    WARNING: Failed to stop VM ${vmid}: ${qm_output}"
@@ -2203,8 +2221,8 @@ action_scale_cluster() {
             vmid=$(( WORKER_VMID_START + i ))
             log "  Stopping VM ${vmid}..."
             if ! qm_output=$(qm stop "${vmid}" 2>&1); then
-                local vm_status=$(qm status "${vmid}" 2>/dev/null | awk '{print $2}')
-                if [[ "${vm_status}" == "stopped" ]]; then
+                # VM might already be stopped, check status without relying on field positions
+                if qm status "${vmid}" 2>/dev/null | grep -qi 'stopped'; then
                     log "    VM ${vmid} already stopped"
                 else
                     log "    WARNING: Failed to stop VM ${vmid}: ${qm_output}"
