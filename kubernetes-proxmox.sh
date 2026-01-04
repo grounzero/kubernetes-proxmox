@@ -1154,10 +1154,14 @@ create_vm_from_template() {
             log "Applying IP change for VM ${vmid}..."
             if qm status "${vmid}" 2>/dev/null | grep -qE 'status:\s+running'; then
                 log "Rebooting VM ${vmid}..."
-                qm reboot "${vmid}" >/dev/null 2>&1 || true
+                if ! qm_output=$(qm reboot "${vmid}" 2>&1); then
+                    log "WARNING: Failed to reboot VM ${vmid}: ${qm_output}"
+                fi
             else
                 log "Starting VM ${vmid}..."
-                qm start "${vmid}" >/dev/null 2>&1 || true
+                if ! qm_output=$(qm start "${vmid}" 2>&1); then
+                    log "WARNING: Failed to start VM ${vmid}: ${qm_output}"
+                fi
             fi
             sleep 5
         fi
@@ -1226,10 +1230,19 @@ fi
 
 # Start all VMs
 log "Starting VMs..."
-qm start "${CP_VMID}" >/dev/null 2>&1 || true
+if ! qm_output=$(qm start "${CP_VMID}" 2>&1); then
+    log "WARNING: Failed to start control plane VM ${CP_VMID}: ${qm_output}"
+else
+    log "Started control plane VM ${CP_VMID}"
+fi
+
 for ((i=0; i<WORKER_COUNT; i++)); do
     vmid=$(( WORKER_VMID_START + i ))
-    qm start "${vmid}" >/dev/null 2>&1 || true
+    if ! qm_output=$(qm start "${vmid}" 2>&1); then
+        log "WARNING: Failed to start worker VM ${vmid}: ${qm_output}"
+    else
+        log "Started worker VM ${vmid}"
+    fi
 done
 
 log "Waiting ${STARTUP_WAIT_SECONDS}s for VMs..."
@@ -1903,17 +1916,33 @@ action_fresh_install() {
     for vmid in ${CP_VMID} $(seq ${WORKER_VMID_START} $((WORKER_VMID_START + 9))); do
         if pve_has_vmid "${vmid}"; then
             log "  Stopping VM ${vmid}..."
-            qm stop "${vmid}" 2>/dev/null || true
+            if ! qm_output=$(qm stop "${vmid}" 2>&1); then
+                # VM might already be stopped, check status
+                local vm_status=$(qm status "${vmid}" 2>/dev/null | awk '{print $2}')
+                if [[ "${vm_status}" == "stopped" ]]; then
+                    log "    VM ${vmid} already stopped"
+                else
+                    log "    WARNING: Failed to stop VM ${vmid}: ${qm_output}"
+                fi
+            fi
             sleep 2
             log "  Destroying VM ${vmid}..."
-            qm destroy "${vmid}" 2>/dev/null && log "    Destroyed VM ${vmid}" || log "    Failed to destroy VM ${vmid}"
+            if ! qm_output=$(qm destroy "${vmid}" 2>&1); then
+                log "    ERROR: Failed to destroy VM ${vmid}: ${qm_output}"
+            else
+                log "    Destroyed VM ${vmid}"
+            fi
         fi
     done
 
     # Destroy template
     if pve_has_vmid "${TEMPLATE_VMID}"; then
         log "  Destroying template ${TEMPLATE_VMID}..."
-        qm destroy "${TEMPLATE_VMID}" 2>/dev/null && log "    Destroyed template" || log "    Failed to destroy template"
+        if ! qm_output=$(qm destroy "${TEMPLATE_VMID}" 2>&1); then
+            log "    ERROR: Failed to destroy template: ${qm_output}"
+        else
+            log "    Destroyed template"
+        fi
     fi
 
     # Clean up Ansible directory
@@ -1954,17 +1983,32 @@ action_destroy_cluster() {
     for vmid in ${CP_VMID} $(seq ${WORKER_VMID_START} $((WORKER_VMID_START + 9))); do
         if pve_has_vmid "${vmid}"; then
             log "  Stopping VM ${vmid}..."
-            qm stop "${vmid}" 2>/dev/null || true
+            if ! qm_output=$(qm stop "${vmid}" 2>&1); then
+                local vm_status=$(qm status "${vmid}" 2>/dev/null | awk '{print $2}')
+                if [[ "${vm_status}" == "stopped" ]]; then
+                    log "    VM ${vmid} already stopped"
+                else
+                    log "    WARNING: Failed to stop VM ${vmid}: ${qm_output}"
+                fi
+            fi
             sleep 2
             log "  Destroying VM ${vmid}..."
-            qm destroy "${vmid}" 2>/dev/null && log "    Destroyed" || log "    Failed"
+            if ! qm_output=$(qm destroy "${vmid}" 2>&1); then
+                log "    ERROR: Failed to destroy VM ${vmid}: ${qm_output}"
+            else
+                log "    Destroyed"
+            fi
         fi
     done
 
     # Destroy template
     if pve_has_vmid "${TEMPLATE_VMID}"; then
         log "  Destroying template ${TEMPLATE_VMID}..."
-        qm destroy "${TEMPLATE_VMID}" 2>/dev/null && log "    Destroyed" || log "    Failed"
+        if ! qm_output=$(qm destroy "${TEMPLATE_VMID}" 2>&1); then
+            log "    ERROR: Failed to destroy template: ${qm_output}"
+        else
+            log "    Destroyed"
+        fi
     fi
 
     # Clean up Ansible directory
@@ -2106,10 +2150,21 @@ action_scale_cluster() {
         for ((i=WORKER_COUNT; i<existing_workers; i++)); do
             vmid=$(( WORKER_VMID_START + i ))
             log "  Stopping VM ${vmid}..."
-            qm stop "${vmid}" 2>/dev/null || true
+            if ! qm_output=$(qm stop "${vmid}" 2>&1); then
+                local vm_status=$(qm status "${vmid}" 2>/dev/null | awk '{print $2}')
+                if [[ "${vm_status}" == "stopped" ]]; then
+                    log "    VM ${vmid} already stopped"
+                else
+                    log "    WARNING: Failed to stop VM ${vmid}: ${qm_output}"
+                fi
+            fi
             sleep 2
             log "  Destroying VM ${vmid}..."
-            qm destroy "${vmid}" 2>/dev/null && log "    Destroyed" || log "    Failed"
+            if ! qm_output=$(qm destroy "${vmid}" 2>&1); then
+                log "    ERROR: Failed to destroy VM ${vmid}: ${qm_output}"
+            else
+                log "    Destroyed"
+            fi
         done
 
         log "Scale down complete"
