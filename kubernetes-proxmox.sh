@@ -647,8 +647,18 @@ validate_k8s_version() {
     fi
 
     local version_pattern="${normalized_k8s_version}-"
-    if echo "${package_info}" | grep -q "Package: kubeadm"; then
-        if echo "${package_info}" | grep -A5 "Package: kubeadm" | grep -q "Version:.*${version_pattern}"; then
+            local kubeadm_block
+            kubeadm_block=$(echo "${package_info}" | grep -A2 "Package: kubeadm" || true)
+
+            local version_lines
+            version_lines=$(echo "${kubeadm_block}" | grep "Version:" | head -5 || true)
+
+            local available_versions
+            if [[ -n "${version_lines}" ]]; then
+                available_versions=$(echo "${version_lines}" | sed 's/Version: /  - /')
+            else
+                available_versions="  (could not list versions)"
+            fi
             log "✓ Kubernetes version ${K8S_SEMVER} found in repository"
         else
             log "ERROR: Kubernetes version ${K8S_SEMVER} not found in repository"
