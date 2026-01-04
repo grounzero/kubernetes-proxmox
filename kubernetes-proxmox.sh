@@ -171,7 +171,7 @@ UBUNTU_IMAGE_FILE=""
 TEMPLATE_VMID="9000"
 CP_VMID="9100"
 WORKER_VMID_START="9101"
-WORKER_COUNT="2"
+WORKER_COUNT="3"
 
 # VM sizing (separate settings for template, control plane, and workers)
 TEMPLATE_CORES="2"
