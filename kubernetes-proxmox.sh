@@ -324,10 +324,17 @@ ssh_vm() {
 # Helper function with custom SSH options
 ssh_vm_opts() {
     local target="$1"
-    local custom_opts="$2"
+    local custom_opts_str="$2"
+    local -a custom_opts=()
+
+    # Split custom options string into an array so multiple options are passed correctly
+    if [[ -n "${custom_opts_str}" ]]; then
+        read -r -a custom_opts <<< "${custom_opts_str}"
+    fi
+
     shift 2
     ssh -i "${VM_SSH_KEY_PATH}" \
-        "${custom_opts}" \
+        "${custom_opts[@]}" \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         "${VM_USER}@${target}" "$@"
