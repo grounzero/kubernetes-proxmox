@@ -636,8 +636,17 @@ validate_k8s_version() {
 
     # Check if kubeadm package with our version exists
     # Package version format is typically: 1.35.0-1.1
-    local version_pattern="${K8S_SEMVER#v}-"
+    # Normalize K8S_SEMVER to handle both "v1.35.0" and "1.35.0" formats
+    local normalized_k8s_version="${K8S_SEMVER#v}"
 
+    # Basic validation: expect a semantic version like X.Y.Z
+    if [[ ! "${normalized_k8s_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        log "ERROR: Invalid Kubernetes version format: ${K8S_SEMVER}"
+        log "ERROR: Expected a version like '1.35.0' or 'v1.35.0'"
+        exit 1
+    fi
+
+    local version_pattern="${normalized_k8s_version}-"
     if echo "${package_info}" | grep -q "Package: kubeadm"; then
         if echo "${package_info}" | grep -A5 "Package: kubeadm" | grep -q "Version:.*${version_pattern}"; then
             log "✓ Kubernetes version ${K8S_SEMVER} found in repository"
