@@ -513,9 +513,11 @@ check_host_resources() {
             # LVM storage - check VG free space
             local vg_name
             # Extract vgname value from 'pvesm config' output
-            # Format: "  vgname: pve" -> extract "pve"
-            # Match lines with 'vgname' as key, trim whitespace from value
-            vg_name=$(pvesm config "${PM_STORAGE}" 2>/dev/null | awk -F':' '$1 ~ /^[[:space:]]*vgname[[:space:]]*$/ {gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2}' || echo "")
+            # Handles formats like:
+            #   "vgname pve"
+            #   "vgname: pve"
+            #   "vgname : pve extra"
+            vg_name=$(pvesm config "${PM_STORAGE}" 2>/dev/null | awk '$1 == "vgname" { for (i = 2; i <= NF; i++) { if ($i != ":") { gsub(/:$/, "", $i); print $i; exit } } }' || echo "")
             if [[ -n "${vg_name}" ]]; then
                 local vg_free_gb=$(vgs --noheadings --units g -o vg_free "${vg_name}" 2>/dev/null | awk '{sub(/g$/,"",$1); print int($1)}' || echo "0")
                 log "  Disk: ${vg_free_gb}GB available on ${PM_STORAGE}"
