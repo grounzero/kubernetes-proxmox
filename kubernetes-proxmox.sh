@@ -2519,10 +2519,6 @@ action_reset_kubernetes() {
 action_scale_cluster() {
     log "Scaling cluster..."
 
-    echo ""
-    echo "Current worker count: ${WORKER_COUNT}"
-    echo ""
-
     # Count existing worker VMs
     local existing_workers=0
     for ((i=0; i<10; i++)); do
@@ -2532,9 +2528,39 @@ action_scale_cluster() {
         fi
     done
 
-    echo "Existing worker VMs: ${existing_workers}"
-    echo "Script configured for: ${WORKER_COUNT} workers"
     echo ""
+    echo "============================================================"
+    echo "  Current State:"
+    echo "    Existing worker VMs: ${existing_workers}"
+    echo "    Config file setting: ${WORKER_COUNT} workers"
+    echo "============================================================"
+    echo ""
+
+    # Prompt for desired worker count
+    local desired_workers=""
+    while true; do
+        echo -n "Enter desired worker count (1-10) or press Enter to use config [${WORKER_COUNT}]: "
+        read -r desired_workers
+
+        # If empty, use config value
+        if [[ -z "${desired_workers}" ]]; then
+            desired_workers="${WORKER_COUNT}"
+            echo "Using config value: ${desired_workers} workers"
+            break
+        fi
+
+        # Validate input is a number between 1-10
+        if [[ "${desired_workers}" =~ ^[0-9]+$ ]] && (( desired_workers >= 1 && desired_workers <= 10 )); then
+            break
+        else
+            echo "Invalid input. Please enter a number between 1 and 10."
+        fi
+    done
+
+    echo ""
+
+    # Update WORKER_COUNT to the desired value
+    WORKER_COUNT="${desired_workers}"
 
     if (( existing_workers < WORKER_COUNT )); then
         log "Scaling UP: Adding $((WORKER_COUNT - existing_workers)) worker(s)"
