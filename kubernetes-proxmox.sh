@@ -188,6 +188,7 @@ WORKER_DISK_GB="50"
 VM_USER="ubuntu"
 VM_SSH_KEY_PATH="/root/.ssh/id_ed25519"
 VM_SSH_PUBKEY_PATH="/root/.ssh/id_ed25519.pub"
+VM_DOMAIN="local"
 
 # Kubernetes configuration (latest stable versions as of Jan 2026)
 K8S_CHANNEL="v1.35"
@@ -234,6 +235,13 @@ need_cmd() {
 
 pve_has_vmid() {
     qm status "$1" >/dev/null 2>&1
+}
+
+# Convert IP address to hostname format (e.g., 10.0.0.60 -> 10-0-0-60.local)
+ip_to_hostname() {
+    local ip="$1"
+    local ip_dashed="${ip//./-}"
+    echo "${ip_dashed}.${VM_DOMAIN}"
 }
 
 ensure_root() {
@@ -1626,16 +1634,20 @@ create_vm_from_template() {
 
 # Create control plane VM
 log "Setting up control plane..."
-create_vm_from_template "${CP_VMID}" "${VM_NAME_PREFIX}-cp-1" "${CP_IP}" "${CP_CORES}" "${CP_MEMORY_MB}" "${CP_DISK_GB}"
+CP_HOSTNAME="$(ip_to_hostname "${CP_IP}")"
+create_vm_from_template "${CP_VMID}" "${CP_HOSTNAME}" "${CP_IP}" "${CP_CORES}" "${CP_MEMORY_MB}" "${CP_DISK_GB}"
 
 # Create worker VMs
 log "Setting up workers..."
 WORKER_IPS=()
+WORKER_HOSTNAMES=()
 for ((i=0; i<WORKER_COUNT; i++)); do
     vmid=$(( WORKER_VMID_START + i ))
     ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
+    hostname="$(ip_to_hostname "${ip}")"
     WORKER_IPS+=("${ip}")
-    create_vm_from_template "${vmid}" "${VM_NAME_PREFIX}-worker-$((i+1))" "${ip}" "${WORKER_CORES}" "${WORKER_MEMORY_MB}" "${WORKER_DISK_GB}"
+    WORKER_HOSTNAMES+=("${hostname}")
+    create_vm_from_template "${vmid}" "${hostname}" "${ip}" "${WORKER_CORES}" "${WORKER_MEMORY_MB}" "${WORKER_DISK_GB}"
 done
 
 # Check for orphaned worker VMs if WORKER_COUNT was reduced
@@ -1741,11 +1753,11 @@ EOF
 # Write Ansible inventory
 {
     echo "[control_plane]"
-    echo "cp1 ansible_host=${CP_IP}"
+    echo "${CP_HOSTNAME} ansible_host=${CP_IP}"
     echo
     echo "[workers]"
     for ((i=0; i<WORKER_COUNT; i++)); do
-        echo "worker$((i+1)) ansible_host=${WORKER_IPS[$i]}"
+        echo "${WORKER_HOSTNAMES[$i]} ansible_host=${WORKER_IPS[$i]}"
     done
     echo
     echo "[k8s:children]"
