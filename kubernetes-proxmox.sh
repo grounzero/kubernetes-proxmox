@@ -1398,7 +1398,7 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
         # The asterisk (*) indicates binary mode in checksum files (vs space for text mode)
         local image_filename="${UBUNTU_IMAGE_URL##*/}"
         local expected_checksum
-        expected_checksum=$(awk -v f="${image_filename}" '{name = $2; sub(/^\*/, "", name); if (name == f) { print $1; exit }}' "${sha256_file}")
+        expected_checksum=$(awk -v f="${image_filename}" '{filename = $2; sub(/^\*/, "", filename); if (filename == f) { print $1; exit }}' "${sha256_file}")
 
         if [[ -z "${expected_checksum}" ]]; then
             log "ERROR: Could not find checksum for ${image_filename} in SHA256SUMS"
