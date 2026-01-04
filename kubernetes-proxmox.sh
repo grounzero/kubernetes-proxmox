@@ -1061,6 +1061,7 @@ action_export_kubeconfig() {
     echo "Export Options:"
     echo "  1) Export with control plane IP (${CP_IP}) - for local network access"
     echo "  2) Export with custom hostname/IP - for remote access or DNS name"
+    echo "  3) Print to console (display kubeconfig directly)"
     echo "  0) Cancel"
     echo ""
 
@@ -1085,6 +1086,53 @@ action_export_kubeconfig() {
                 return 1
             fi
             api_server_address="${custom_address}"
+            ;;
+        3)
+            # Print to console option
+            log "Fetching kubeconfig from control plane..."
+
+            # Fetch the admin.conf from control plane
+            local raw_kubeconfig
+            raw_kubeconfig=$(ssh_vm "${CP_IP}" "sudo cat /etc/kubernetes/admin.conf" 2>/dev/null)
+
+            if [[ -z "${raw_kubeconfig}" ]]; then
+                log "ERROR: Failed to fetch kubeconfig from control plane"
+                return 1
+            fi
+
+            # Replace the API server address
+            local modified_kubeconfig
+            modified_kubeconfig=$(echo "${raw_kubeconfig}" | sed "s|server: https://[^:]*:6443|server: https://${api_server_address}:6443|g")
+
+            # Update cluster name and context for clarity
+            # First, rename the cluster
+            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes$|name: proxmox-k8s|g")
+            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|cluster: kubernetes$|cluster: proxmox-k8s|g")
+
+            # Rename the user (both in users list and context reference)
+            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes-admin$|name: proxmox-k8s-admin|g")
+            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|user: kubernetes-admin$|user: proxmox-k8s-admin|g")
+
+            # Rename the context name and current-context
+            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes-admin@kubernetes$|name: proxmox-k8s-admin@proxmox-k8s|g")
+            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|current-context: kubernetes-admin@kubernetes$|current-context: proxmox-k8s-admin@proxmox-k8s|g")
+
+            log "============================================================================"
+            log "Kubeconfig for API server: https://${api_server_address}:6443"
+            log "============================================================================"
+            echo ""
+            echo "Copy the content below (select and copy to clipboard):"
+            echo ""
+            echo "---BEGIN KUBECONFIG---"
+            echo "${modified_kubeconfig}"
+            echo "---END KUBECONFIG---"
+            echo ""
+            log "To use this kubeconfig:"
+            log "  1. Copy the content above to a file (e.g., ~/.kube/proxmox-k8s.yaml)"
+            log "  2. Use it with kubectl: export KUBECONFIG=~/.kube/proxmox-k8s.yaml"
+            log "  3. Or import to Lens by pasting the content"
+            log "============================================================================"
+            return 0
             ;;
         0)
             log "Export cancelled"
@@ -1112,11 +1160,17 @@ action_export_kubeconfig() {
     modified_kubeconfig=$(echo "${raw_kubeconfig}" | sed "s|server: https://[^:]*:6443|server: https://${api_server_address}:6443|g")
 
     # Update cluster name and context for clarity
-    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes|name: proxmox-k8s|g")
-    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|cluster: kubernetes|cluster: proxmox-k8s|g")
-    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|context: kubernetes-admin@kubernetes|context: admin@proxmox-k8s|g")
-    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|current-context: kubernetes-admin@kubernetes|current-context: admin@proxmox-k8s|g")
-    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|user: kubernetes-admin|user: admin|g")
+    # First, rename the cluster
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes$|name: proxmox-k8s|g")
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|cluster: kubernetes$|cluster: proxmox-k8s|g")
+
+    # Rename the user (both in users list and context reference)
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes-admin$|name: proxmox-k8s-admin|g")
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|user: kubernetes-admin$|user: proxmox-k8s-admin|g")
+
+    # Rename the context name and current-context
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes-admin@kubernetes$|name: proxmox-k8s-admin@proxmox-k8s|g")
+    modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|current-context: kubernetes-admin@kubernetes$|current-context: proxmox-k8s-admin@proxmox-k8s|g")
 
     # Write to timestamped file
     echo "${modified_kubeconfig}" > "${kubeconfig_file}"
