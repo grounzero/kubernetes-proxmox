@@ -817,9 +817,12 @@ get_vm_status() {
     local vmid=$1
     if pve_has_vmid "${vmid}"; then
         # Use grep to extract status without relying on field positions
-        if qm status "${vmid}" 2>/dev/null | grep -qi 'stopped'; then
+        # Capture qm status output once to avoid multiple subprocess calls
+        local status_output
+        status_output=$(qm status "${vmid}" 2>/dev/null || true)
+        if echo "${status_output}" | grep -qi 'stopped'; then
             echo "stopped"
-        elif qm status "${vmid}" 2>/dev/null | grep -qi 'running'; then
+        elif echo "${status_output}" | grep -qi 'running'; then
             echo "running"
         else
             echo "unknown"
