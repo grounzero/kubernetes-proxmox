@@ -547,7 +547,7 @@ check_host_resources() {
                     local vg_free_gb=0
                 else
                     local vg_free_gb
-                    vg_free_gb=$(awk '{sub(/g$/,"",$1); print int($1)}' <<< "${vg_free_raw}")
+                    vg_free_gb=$(awk '{sub(/[gG]$/,"",$1); print int($1)}' <<< "${vg_free_raw}")
                 fi
                 log "  Disk: ${vg_free_gb}GB available on ${PM_STORAGE}"
 
@@ -715,6 +715,7 @@ validate_k8s_version() {
     #   - 1.35.0-alpha.2
     #   - 1.35.0-alpha.2.3
     #   - 1.35.0-rc.1.commit.abc123
+    # Pattern allows alphanumerics (0-9, A-Z, a-z) in pre-release identifiers, no underscores
     local K8S_VERSION_PATTERN='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
 
     if [[ ! "${normalized_k8s_version}" =~ $K8S_VERSION_PATTERN ]]; then
@@ -1111,9 +1112,10 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
         log "Verifying image integrity..."
 
         # Extract only the checksum for our specific file (match filename from URL as in SHA256SUMS)
+        # SHA256SUMS format: "checksum *filename" (exactly 2 fields)
         local image_filename="${UBUNTU_IMAGE_URL##*/}"
         local expected_checksum
-        expected_checksum=$(awk -v f="${image_filename}" '{name = $NF; sub(/^\*/, "", name); if (name == f) print $1}' "${sha256_file}")
+        expected_checksum=$(awk -v f="${image_filename}" '{name = $2; sub(/^\*/, "", name); if (name == f) print $1}' "${sha256_file}")
 
         if [[ -z "${expected_checksum}" ]]; then
             log "ERROR: Could not find checksum for ${image_filename} in SHA256SUMS"
@@ -1492,7 +1494,7 @@ cat > "${ANSIBLE_PLAYBOOK}" <<\EOF
   gather_facts: true
   tasks:
     - name: Wait for cloud-init to complete
-      command: timeout ${CLOUD_INIT_TIMEOUT_SECONDS} cloud-init status --wait
+      command: timeout CLOUD_INIT_TIMEOUT_PLACEHOLDER cloud-init status --wait
       changed_when: false
       failed_when: false
 
@@ -1994,6 +1996,9 @@ cat > "${ANSIBLE_PLAYBOOK}" <<\EOF
         - hostvars[groups['control_plane'][0]].k8s_join_command is defined
         - not kubeletconf_final.stat.exists
 EOF
+
+# Replace placeholder with actual timeout value
+sed -i "s/CLOUD_INIT_TIMEOUT_PLACEHOLDER/${CLOUD_INIT_TIMEOUT_SECONDS}/g" "${ANSIBLE_PLAYBOOK}"
 
 ############################################
 # RUN ANSIBLE PLAYBOOK
