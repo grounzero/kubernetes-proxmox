@@ -1415,12 +1415,12 @@ for node_ip in "${CP_IP}" "${WORKER_IPS[@]}"; do
         log "WARNING: This may cause configuration issues"
 
         # Check if cloud-init is at least done (even if it had errors)
-        local status=$(ssh_vm_opts "${node_ip}" "-o ConnectTimeout=10" "cloud-init status" 2>/dev/null || echo "unknown")
+        local cloud_init_status=$(ssh_vm_opts "${node_ip}" "-o ConnectTimeout=10" "cloud-init status" 2>/dev/null || echo "unknown")
 
-        if [[ "${status}" == *"done"* ]]; then
+        if [[ "${cloud_init_status}" == *"done"* ]]; then
             log "  Cloud-init status shows 'done' on ${node_ip} (may have had errors)"
         else
-            log "ERROR: Cloud-init may not be ready on ${node_ip} (status: ${status})"
+            log "ERROR: Cloud-init may not be ready on ${node_ip} (status: ${cloud_init_status})"
 
             if [[ "${MENU_MODE}" == "true" ]]; then
                 echo ""
