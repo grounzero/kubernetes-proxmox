@@ -1207,7 +1207,7 @@ action_export_kubeconfig() {
     echo "3. For kubectl (permanent - merge with existing):"
     echo "   KUBECONFIG=~/.kube/config:${kubeconfig_file} kubectl config view --flatten > ~/.kube/config.new"
     echo "   mv ~/.kube/config.new ~/.kube/config"
-    echo "   kubectl config use-context admin@proxmox-k8s"
+    echo "   kubectl config use-context proxmox-k8s-admin@proxmox-k8s"
     echo ""
     echo "4. Copy to local machine:"
     echo "   scp root@\$(hostname -I | awk '{print \$1}'):${kubeconfig_file} ~/.kube/proxmox-k8s.yaml"
