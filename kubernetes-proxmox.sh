@@ -559,7 +559,7 @@ check_host_resources() {
                     local vg_free_gb=0
                 else
                     local vg_free_gb
-                    vg_free_gb=$(awk '{sub(/[gG]$/,"",$1); print int($1)}' <<< "${vg_free_raw}")
+                    vg_free_gb=$(awk '{sub(/[gG]$/,"",$1); printf "%.0f\n", $1}' <<< "${vg_free_raw}")
                 fi
                 log "  Disk: ${vg_free_gb}GB available on ${PM_STORAGE}"
 
