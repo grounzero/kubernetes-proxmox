@@ -589,6 +589,81 @@ validate_worker_count() {
     fi
 }
 
+# Validate Kubernetes version availability
+validate_k8s_version() {
+    log "Validating Kubernetes version ${K8S_SEMVER}..."
+
+    # Check if we can reach the Kubernetes package repository
+    local k8s_repo_url="https://pkgs.k8s.io/core:/stable:/${K8S_CHANNEL}/deb"
+    local packages_url="${k8s_repo_url}/Packages"
+
+    # Try to fetch the Packages file to verify repository accessibility
+    if ! curl -fsSL --connect-timeout 10 "${packages_url}" >/dev/null 2>&1; then
+        log "ERROR: Cannot reach Kubernetes package repository"
+        log "ERROR: URL: ${packages_url}"
+        log "ERROR: Check your internet connection and firewall settings"
+
+        if [[ "${MENU_MODE}" == "true" ]]; then
+            echo ""
+            echo "KUBERNETES REPOSITORY UNREACHABLE!"
+            echo "Cannot verify if Kubernetes ${K8S_SEMVER} is available."
+            echo ""
+            if ! confirm_action "Continue without version validation?"; then
+                log "Deployment cancelled due to repository access failure"
+                exit 1
+            fi
+        fi
+        return 0
+    fi
+
+    # Fetch the Packages file and check if our version exists
+    local package_info=$(curl -fsSL --connect-timeout 10 "${packages_url}" 2>/dev/null)
+
+    if [[ -z "${package_info}" ]]; then
+        log "WARNING: Could not fetch package information from repository"
+        log "WARNING: Cannot validate if Kubernetes ${K8S_SEMVER} is available"
+        return 0
+    fi
+
+    # Check if kubeadm package with our version exists
+    # Package version format is typically: 1.35.0-1.1
+    local version_pattern="${K8S_SEMVER#v}-"
+
+    if echo "${package_info}" | grep -q "Package: kubeadm"; then
+        if echo "${package_info}" | grep -A5 "Package: kubeadm" | grep -q "Version:.*${version_pattern}"; then
+            log "✓ Kubernetes version ${K8S_SEMVER} found in repository"
+        else
+            log "ERROR: Kubernetes version ${K8S_SEMVER} not found in repository"
+            log "ERROR: The specified version may not exist or may be misspelled"
+            log "ERROR: Available versions can be found at: https://kubernetes.io/releases/"
+
+            # Try to show available versions
+            local available_versions=$(echo "${package_info}" | grep -A2 "Package: kubeadm" | grep "Version:" | head -5 | sed 's/Version: /  - /' || echo "  (could not list versions)")
+
+            log "Recent versions in repository:"
+            echo "${available_versions}" | while read -r line; do
+                log "${line}"
+            done
+
+            if [[ "${MENU_MODE}" == "true" ]]; then
+                echo ""
+                echo "KUBERNETES VERSION NOT FOUND!"
+                echo "The specified version ${K8S_SEMVER} does not exist in the repository."
+                echo "Please update K8S_SEMVER and K8S_CHANNEL in the script configuration."
+                echo ""
+                echo "Recent available versions:"
+                echo "${available_versions}"
+                echo ""
+                read -p "Press Enter to exit..."
+            fi
+            exit 1
+        fi
+    else
+        log "WARNING: Could not parse package repository format"
+        log "WARNING: Skipping version validation"
+    fi
+}
+
 ############################################
 # MENU SYSTEM FUNCTIONS
 ############################################
@@ -850,6 +925,7 @@ action_reconfigure() {
     # Run pre-flight checks
     log "Running pre-flight checks..."
     validate_worker_count
+    validate_k8s_version
     ensure_ssh_keys
     validate_network_config
     check_host_resources
@@ -903,6 +979,56 @@ UBUNTU_IMAGE_URL="$(ubuntu_image_url "${UBUNTU_RELEASE}")"
 if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
     log "Downloading Ubuntu ${UBUNTU_RELEASE}..."
     curl -fsSL -o "${UBUNTU_IMAGE_PATH}" "${UBUNTU_IMAGE_URL}"
+
+    # Download SHA256SUMS file for verification
+    log "Downloading SHA256 checksums..."
+    local sha256_url="${UBUNTU_IMAGE_URL%/*}/SHA256SUMS"
+    local sha256_file="${UBUNTU_IMAGE_PATH}.sha256"
+
+    if curl -fsSL -o "${sha256_file}" "${sha256_url}"; then
+        log "Verifying image integrity..."
+
+        # Extract only the checksum for our specific file
+        local expected_checksum=$(grep "$(basename "${UBUNTU_IMAGE_FILE}")" "${sha256_file}" | awk '{print $1}')
+
+        if [[ -z "${expected_checksum}" ]]; then
+            log "ERROR: Could not find checksum for $(basename "${UBUNTU_IMAGE_FILE}") in SHA256SUMS"
+            log "ERROR: Downloaded image may be compromised or incorrect"
+            rm -f "${UBUNTU_IMAGE_PATH}" "${sha256_file}"
+            exit 1
+        fi
+
+        # Calculate actual checksum
+        local actual_checksum=$(sha256sum "${UBUNTU_IMAGE_PATH}" | awk '{print $1}')
+
+        if [[ "${actual_checksum}" != "${expected_checksum}" ]]; then
+            log "ERROR: SHA256 checksum verification FAILED!"
+            log "ERROR: Expected: ${expected_checksum}"
+            log "ERROR: Got:      ${actual_checksum}"
+            log "ERROR: The downloaded image may be corrupted or compromised"
+            rm -f "${UBUNTU_IMAGE_PATH}" "${sha256_file}"
+            exit 1
+        fi
+
+        log "✓ SHA256 checksum verification passed"
+        rm -f "${sha256_file}"
+    else
+        log "WARNING: Could not download SHA256SUMS file"
+        log "WARNING: Proceeding without integrity verification (not recommended)"
+
+        if [[ "${MENU_MODE}" == "true" ]]; then
+            echo ""
+            echo "SECURITY WARNING: Unable to verify image integrity!"
+            echo "The Ubuntu cloud image could not be verified against SHA256 checksums."
+            echo "This may indicate a compromised or corrupted download."
+            echo ""
+            if ! confirm_action "Continue without verification?"; then
+                log "Deployment cancelled due to failed integrity check"
+                rm -f "${UBUNTU_IMAGE_PATH}"
+                exit 1
+            fi
+        fi
+    fi
 else
     log "Ubuntu image found: ${UBUNTU_IMAGE_PATH}"
 fi
@@ -1114,6 +1240,52 @@ wait_for_ssh "${CP_IP}"
 for ip in "${WORKER_IPS[@]}"; do
     wait_for_ssh "${ip}"
 done
+
+# Wait for cloud-init to complete on all nodes
+log "Waiting for cloud-init to complete..."
+for node_ip in "${CP_IP}" "${WORKER_IPS[@]}"; do
+    log "  Checking cloud-init status on ${node_ip}..."
+
+    # Wait for cloud-init to complete (timeout after 300 seconds)
+    if ssh -i "${VM_SSH_KEY_PATH}" \
+           -o StrictHostKeyChecking=no \
+           -o UserKnownHostsFile=/dev/null \
+           -o ConnectTimeout=10 \
+           "${VM_USER}@${node_ip}" \
+           "timeout 300 cloud-init status --wait" 2>/dev/null; then
+        log "  ✓ Cloud-init completed on ${node_ip}"
+    else
+        log "WARNING: cloud-init status check failed on ${node_ip}"
+        log "WARNING: This may cause configuration issues"
+
+        # Check if cloud-init is at least done (even if it had errors)
+        local status=$(ssh -i "${VM_SSH_KEY_PATH}" \
+                          -o StrictHostKeyChecking=no \
+                          -o UserKnownHostsFile=/dev/null \
+                          -o ConnectTimeout=10 \
+                          "${VM_USER}@${node_ip}" \
+                          "cloud-init status" 2>/dev/null || echo "unknown")
+
+        if [[ "${status}" == *"done"* ]]; then
+            log "  Cloud-init status shows 'done' on ${node_ip} (may have had errors)"
+        else
+            log "ERROR: Cloud-init may not be ready on ${node_ip} (status: ${status})"
+
+            if [[ "${MENU_MODE}" == "true" ]]; then
+                echo ""
+                echo "CLOUD-INIT WARNING!"
+                echo "Cloud-init may not have completed successfully on ${node_ip}"
+                echo "Continuing may result in incomplete VM configuration."
+                echo ""
+                if ! confirm_action "Continue anyway?"; then
+                    log "Deployment cancelled due to cloud-init issues"
+                    exit 1
+                fi
+            fi
+        fi
+    fi
+done
+log "Cloud-init checks complete"
 
 ############################################
 # ANSIBLE CONFIGURATION
