@@ -310,6 +310,18 @@ ip_add_octet() {
     echo "${base}${octet}"
 }
 
+# Extract a package section from Debian package info (Packages file format)
+# Usage: extract_package_section "package-name" "${package_data}"
+extract_package_section() {
+    local package_name="$1"
+    local package_data="$2"
+    awk -v target_pkg="$package_name" '
+        $0 == "Package: " target_pkg { in_pkg = 1; print; next }
+        /^Package:/ && in_pkg { exit }
+        in_pkg { print }
+    ' <<< "${package_data}"
+}
+
 # Helper function to run SSH commands with standard options
 # Usage: ssh_vm <ip> [command...]
 # For custom SSH options, use: ssh_vm_opts <ip> "<ssh_options>" [command...]
@@ -382,7 +394,7 @@ ensure_ssh_keys() {
             log "         - Verify ssh-keygen is installed (e.g., 'ssh-keygen -h' or 'which ssh-keygen')"
             log "         - Check that $(dirname "${VM_SSH_KEY_PATH}") exists and is writable by the current user"
             log "         - Ensure there is sufficient free disk space"
-            exit "${exit_code}"
+            exit ${exit_code}
         }
 
         log "SSH key created successfully"
@@ -738,17 +750,6 @@ validate_k8s_version() {
             # Try to show available versions
             local available_versions
             local kubeadm_section
-
-            # Helper to extract a package section from package_info
-            extract_package_section() {
-                local package_name="$1"
-                local package_data="$2"
-                awk -v target_pkg="$package_name" '
-                    $0 == "Package: " target_pkg { in_pkg = 1; print; next }
-                    /^Package:/ && in_pkg { exit }
-                    in_pkg { print }
-                ' <<< "${package_data}"
-            }
 
             # Extract the kubeadm package section, then list up to 5 recent versions
             if kubeadm_section=$(extract_package_section "kubeadm" "${package_info}"); then
