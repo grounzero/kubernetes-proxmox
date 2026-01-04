@@ -203,8 +203,9 @@ ANSIBLE_CFG="${ANSIBLE_DIR}/ansible.cfg"
 ANSIBLE_PLAYBOOK="${ANSIBLE_DIR}/site.yml"
 VM_NAME_PREFIX="k8s"
 STARTUP_WAIT_SECONDS="10"
-SSH_WAIT_TIMEOUT_SECONDS="${SSH_WAIT_TIMEOUT_SECONDS:-600}"  # Configurable timeout
-CLOUD_INIT_TIMEOUT_SECONDS="${CLOUD_INIT_TIMEOUT_SECONDS:-300}"  # Configurable cloud-init timeout
+# Configurable via environment variable (default: 600 seconds for SSH, 300 for cloud-init)
+SSH_WAIT_TIMEOUT_SECONDS="${SSH_WAIT_TIMEOUT_SECONDS:-600}"
+CLOUD_INIT_TIMEOUT_SECONDS="${CLOUD_INIT_TIMEOUT_SECONDS:-300}"
 
 # Resource validation settings
 MIN_REQUIRED_MEMORY_MB="8192"  # Minimum 8GB for control plane + 2 workers
@@ -1404,11 +1405,7 @@ for node_ip in "${CP_IP}" "${WORKER_IPS[@]}"; do
     log "  Checking cloud-init status on ${node_ip}..."
 
     # Wait for cloud-init to complete (configurable timeout via CLOUD_INIT_TIMEOUT_SECONDS)
-    if ssh -i "${VM_SSH_KEY_PATH}" \
-           -o StrictHostKeyChecking=no \
-           -o UserKnownHostsFile=/dev/null \
-           -o ConnectTimeout=10 \
-           "${VM_USER}@${node_ip}" \
+    if ssh_vm_opts "${node_ip}" "-o ConnectTimeout=10" \
            "timeout ${CLOUD_INIT_TIMEOUT_SECONDS} cloud-init status --wait" 2>/dev/null; then
         log "  [OK] Cloud-init completed on ${node_ip}"
     else
@@ -2000,16 +1997,15 @@ cat > "${ANSIBLE_PLAYBOOK}" <<\EOF
         - not kubeletconf_final.stat.exists
 EOF
 
-# Replace placeholder with actual timeout value
-sed -i "s/CLOUD_INIT_TIMEOUT_PLACEHOLDER/${CLOUD_INIT_TIMEOUT_SECONDS}/g" "${ANSIBLE_PLAYBOOK}"
-
 ############################################
 # RUN ANSIBLE PLAYBOOK
 ############################################
 
 log "Running Ansible (5-15 min)..."
 
-ANSIBLE_CONFIG="${ANSIBLE_CFG}" ansible-playbook -v -i "${ANSIBLE_INVENTORY}" "${ANSIBLE_PLAYBOOK}"
+ANSIBLE_CONFIG="${ANSIBLE_CFG}" ansible-playbook -v -i "${ANSIBLE_INVENTORY}" \
+    -e "cloud_init_timeout=${CLOUD_INIT_TIMEOUT_SECONDS}" \
+    "${ANSIBLE_PLAYBOOK}"
 
 ############################################
 # COMPLETION
