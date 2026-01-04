@@ -388,13 +388,7 @@ ensure_ssh_keys() {
 
         # Verify key permissions (cross-platform stat command)
         local key_perms=""
-        if key_perms=$(stat -c '%a' "${VM_SSH_KEY_PATH}" 2>/dev/null); then
-            # Permissions successfully retrieved using GNU stat (%a format)
-            :
-        elif key_perms=$(stat -f '%OLp' "${VM_SSH_KEY_PATH}" 2>/dev/null); then
-            # Permissions successfully retrieved using BSD stat (%OLp format)
-            :
-        else
+        if ! { key_perms=$(stat -c '%a' "${VM_SSH_KEY_PATH}" 2>/dev/null) || key_perms=$(stat -f '%OLp' "${VM_SSH_KEY_PATH}" 2>/dev/null); }; then
             log "WARNING: Unable to determine SSH key permissions. Forcing permissions to 600..."
             chmod 600 "${VM_SSH_KEY_PATH}"
             return
@@ -511,9 +505,10 @@ check_host_resources() {
     case "${PM_STORAGE}" in
         "local-lvm")
             # LVM storage - check VG free space
-            storage_path=$(pvesm status | grep "^${PM_STORAGE}" | awk '{print $2}' || echo "")
-            if [[ -n "${storage_path}" ]]; then
-                local vg_free_gb=$(vgs --noheadings --units g -o vg_free "${storage_path}" 2>/dev/null | awk '{sub(/g$/,"",$1); print int($1)}' || echo "0")
+            local vg_name
+            vg_name=$(pvesm config "${PM_STORAGE}" 2>/dev/null | awk -F':' '$1 ~ /^[[:space:]]*vgname[[:space:]]*$/ {gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2}' || echo "")
+            if [[ -n "${vg_name}" ]]; then
+                local vg_free_gb=$(vgs --noheadings --units g -o vg_free "${vg_name}" 2>/dev/null | awk '{sub(/g$/,"",$1); print int($1)}' || echo "0")
                 log "  Disk: ${vg_free_gb}GB available on ${PM_STORAGE}"
 
                 if [[ "${vg_free_gb}" -lt "${required_disk_gb}" ]]; then
@@ -697,7 +692,7 @@ validate_k8s_version() {
             local kubeadm_section
 
             # Extract the kubeadm package section, then list up to 5 recent versions
-            if kubeadm_section=$(printf '%s\n' "${package_info}" | awk '/^Package: kubeadm$/,/^Package:/'); then
+            if kubeadm_section=$(printf '%s\n' "${package_info}" | awk '/^Package: kubeadm$/,/^Package:/ { if (!/^Package:/ || /^Package: kubeadm$/) print }'); then
                 if ! available_versions=$(printf '%s\n' "${kubeadm_section}" | grep '^Version:' | head -n 5 | sed 's/^Version: /  - /'); then
                     available_versions="  (could not list versions)"
                 fi
@@ -705,9 +700,9 @@ validate_k8s_version() {
                 available_versions="  (could not list versions)"
             fi
             log "Recent versions in repository:"
-            echo "${available_versions}" | while read -r line; do
+            while read -r line; do
                 log "${line}"
-            done
+            done <<< "${available_versions}"
 
             if [[ "${MENU_MODE}" == "true" ]]; then
                 echo ""
@@ -1060,7 +1055,7 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
         # Extract only the checksum for our specific file (match filename from URL as in SHA256SUMS)
         local image_filename="${UBUNTU_IMAGE_URL##*/}"
         local expected_checksum
-        expected_checksum=$(awk -v f="${image_filename}" '$0 ~ f {print $1}' "${sha256_file}")
+        expected_checksum=$(awk -v f="${image_filename}" '$2 == "*" f {print $1}' "${sha256_file}")
 
         if [[ -z "${expected_checksum}" ]]; then
             log "ERROR: Could not find checksum for ${image_filename} in SHA256SUMS"
@@ -1070,13 +1065,15 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
         fi
 
         # Calculate actual checksum
-        local actual_checksum
-        if ! actual_checksum=$(sha256sum "${UBUNTU_IMAGE_PATH}" | awk '{print $1}'); then
+        local sha256_output
+        if ! sha256_output=$(sha256sum "${UBUNTU_IMAGE_PATH}"); then
             log "ERROR: Failed to calculate SHA256 checksum for ${UBUNTU_IMAGE_PATH}"
             log "ERROR: The downloaded image may be corrupted, unreadable, or missing"
             rm -f "${UBUNTU_IMAGE_PATH}" "${sha256_file}"
             exit 1
         fi
+        local actual_checksum
+        actual_checksum=$(awk '{print $1}' <<< "${sha256_output}")
 
         if [[ -z "${actual_checksum}" ]]; then
             log "ERROR: Calculated SHA256 checksum is empty for ${UBUNTU_IMAGE_PATH}"
