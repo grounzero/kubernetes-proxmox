@@ -120,12 +120,60 @@ WORKER_IP_START_OCTET=51        # Starting octet for workers
 
 ## What the Script Does
 
-1. **Creates VMs**: Downloads Ubuntu cloud image and creates Proxmox VMs
-2. **Configures Cloud-Init**: Sets up SSH keys, network configuration
-3. **Installs Prerequisites**: Installs containerd, kubeadm, kubectl, kubelet
-4. **Initializes Kubernetes**: Creates control plane and joins worker nodes
-5. **Installs Calico CNI**: Deploys Calico networking
-6. **Validates Cluster**: Ensures all nodes are ready and pods are running
+1. **Pre-Flight Checks**: Validates resources, network, and security before deployment
+2. **Creates VMs**: Downloads Ubuntu cloud image and creates Proxmox VMs
+3. **Configures Cloud-Init**: Sets up SSH keys, network configuration
+4. **Installs Prerequisites**: Installs containerd, kubeadm, kubectl, kubelet
+5. **Initializes Kubernetes**: Creates control plane and joins worker nodes
+6. **Installs Calico CNI**: Deploys Calico networking
+7. **Validates Cluster**: Ensures all nodes are ready and pods are running
+
+## Security & Safety Features
+
+### SSH Key Management
+- **Automatic key generation** with security warnings
+- **Permission validation** (ensures 600 on private keys)
+- **User confirmation** required before creating unencrypted keys
+- Keys stored in `/root/.ssh/` with restrictive permissions
+
+### Pre-Flight Validation
+The script performs comprehensive checks before deployment:
+
+1. **Resource Validation**
+   - Checks available RAM vs required (CP + workers)
+   - Validates disk space on Proxmox storage
+   - Warns about CPU overcommitment
+   - Configurable via `RESOURCE_CHECK_ENABLED` variable
+
+2. **Network Validation**
+   - Detects and warns about non-/24 networks
+   - Verifies gateway reachability
+   - Checks for IP conflicts on planned VM addresses
+   - User confirmation required if conflicts detected
+
+3. **Configuration Validation**
+   - Worker count limits (max 50, warns above 10)
+   - Ensures numeric values for critical parameters
+   - Validates storage configuration
+
+### Resource Requirements
+
+Minimum recommended resources:
+- **Memory**: 8GB RAM (4GB for CP, 2x 2GB for workers, 2GB for host)
+- **Disk**: 100GB free space
+- **CPU**: 2+ physical cores (4+ recommended)
+
+You can override safety checks with:
+```bash
+RESOURCE_CHECK_ENABLED=false ./kubernetes-proxmox.sh -a install
+```
+
+### Configurable Timeouts
+
+```bash
+# Set custom SSH timeout (default: 600 seconds)
+SSH_WAIT_TIMEOUT_SECONDS=900 ./kubernetes-proxmox.sh -a reconfigure
+```
 
 ## Menu Options Explained
 

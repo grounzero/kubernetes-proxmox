@@ -203,7 +203,12 @@ ANSIBLE_CFG="${ANSIBLE_DIR}/ansible.cfg"
 ANSIBLE_PLAYBOOK="${ANSIBLE_DIR}/site.yml"
 VM_NAME_PREFIX="k8s"
 STARTUP_WAIT_SECONDS="10"
-SSH_WAIT_TIMEOUT_SECONDS="600"
+SSH_WAIT_TIMEOUT_SECONDS="${SSH_WAIT_TIMEOUT_SECONDS:-600}"  # Configurable timeout
+
+# Resource validation settings
+MIN_REQUIRED_MEMORY_MB="8192"  # Minimum 8GB for control plane + 2 workers
+MIN_REQUIRED_DISK_GB="100"     # Minimum 100GB free space
+RESOURCE_CHECK_ENABLED="${RESOURCE_CHECK_ENABLED:-true}"  # Set to false to skip checks
 
 ############################################
 # INTERNAL HELPERS
@@ -302,6 +307,286 @@ ip_add_octet() {
     local base="$1" start_octet="$2" index="$3"
     local octet=$(( start_octet + index ))
     echo "${base}${octet}"
+}
+
+############################################
+# SECURITY & VALIDATION FUNCTIONS
+############################################
+
+# Check and create SSH keys with security warnings
+ensure_ssh_keys() {
+    log "Checking SSH key configuration..."
+
+    if [[ ! -f "${VM_SSH_KEY_PATH}" ]]; then
+        log "WARNING: SSH key not found at ${VM_SSH_KEY_PATH}"
+        log "WARNING: Creating new SSH key WITHOUT passphrase protection"
+        log "WARNING: This key will be used for VM access and stored unencrypted"
+        log ""
+
+        if [[ "${MENU_MODE}" == "true" ]]; then
+            echo "SECURITY NOTICE:"
+            echo "  - The SSH key will be created at: ${VM_SSH_KEY_PATH}"
+            echo "  - It will NOT have passphrase protection (required for automation)"
+            echo "  - The key will be stored in /root/.ssh/ (only accessible to root)"
+            echo "  - This key grants full access to all cluster VMs"
+            echo ""
+
+            if ! confirm_action "Continue with SSH key creation?"; then
+                log "SSH key creation cancelled by user"
+                exit 1
+            fi
+        fi
+
+        log "Creating SSH key pair..."
+        ssh-keygen -t ed25519 -f "${VM_SSH_KEY_PATH}" -N "" -C "proxmox-k8s-automation"
+
+        if [[ $? -ne 0 ]]; then
+            log "ERROR: Failed to create SSH key"
+            exit 1
+        fi
+
+        log "SSH key created successfully"
+        log "Public key: ${VM_SSH_PUBKEY_PATH}"
+
+        # Set restrictive permissions
+        chmod 600 "${VM_SSH_KEY_PATH}"
+        chmod 644 "${VM_SSH_PUBKEY_PATH}"
+    else
+        log "SSH key found at ${VM_SSH_KEY_PATH}"
+
+        # Verify key permissions
+        local key_perms=$(stat -c '%a' "${VM_SSH_KEY_PATH}" 2>/dev/null || stat -f '%OLp' "${VM_SSH_KEY_PATH}" 2>/dev/null)
+        if [[ "${key_perms}" != "600" ]]; then
+            log "WARNING: SSH key has insecure permissions (${key_perms}). Setting to 600..."
+            chmod 600 "${VM_SSH_KEY_PATH}"
+        fi
+    fi
+}
+
+# Validate network configuration
+validate_network_config() {
+    log "Validating network configuration..."
+    local errors=0
+
+    # Check if CIDR is actually /24
+    if [[ "${NET_CIDR_PREFIX}" != "24" ]]; then
+        log "WARNING: Network CIDR is /${NET_CIDR_PREFIX}, not /24"
+        log "WARNING: IP allocation logic assumes /24 networks"
+        log "WARNING: This may cause IP conflicts or connectivity issues"
+        ((errors++))
+    fi
+
+    # Validate gateway is reachable
+    if ! ping -c1 -W2 "${NET_GATEWAY}" >/dev/null 2>&1; then
+        log "WARNING: Gateway ${NET_GATEWAY} is not responding to ping"
+        log "WARNING: This may indicate network misconfiguration"
+        ((errors++))
+    fi
+
+    # Check for IP conflicts
+    log "Checking for IP conflicts on planned VM addresses..."
+    local conflict_found=false
+
+    # Check control plane IP
+    if ping -c1 -W1 "${CP_IP}" >/dev/null 2>&1; then
+        if ! pve_has_vmid "${CP_VMID}"; then
+            log "WARNING: IP ${CP_IP} is responding but VM ${CP_VMID} doesn't exist"
+            log "WARNING: This may indicate an IP conflict"
+            conflict_found=true
+            ((errors++))
+        fi
+    fi
+
+    # Check worker IPs
+    for ((i=0; i<WORKER_COUNT; i++)); do
+        local worker_ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
+        local worker_vmid=$((WORKER_VMID_START + i))
+
+        if ping -c1 -W1 "${worker_ip}" >/dev/null 2>&1; then
+            if ! pve_has_vmid "${worker_vmid}"; then
+                log "WARNING: IP ${worker_ip} is responding but VM ${worker_vmid} doesn't exist"
+                log "WARNING: This may indicate an IP conflict"
+                conflict_found=true
+                ((errors++))
+            fi
+        fi
+    done
+
+    if [[ "${conflict_found}" == "true" && "${MENU_MODE}" == "true" ]]; then
+        echo ""
+        echo "NETWORK WARNING: Potential IP conflicts detected!"
+        echo "Continuing may cause network connectivity issues."
+        echo ""
+        if ! confirm_action "Continue anyway?"; then
+            log "Deployment cancelled due to network conflicts"
+            exit 1
+        fi
+    fi
+
+    if [[ "${errors}" -gt 0 ]]; then
+        log "Network validation completed with ${errors} warning(s)"
+    else
+        log "Network validation passed"
+    fi
+}
+
+# Check Proxmox host has sufficient resources
+check_host_resources() {
+    if [[ "${RESOURCE_CHECK_ENABLED}" != "true" ]]; then
+        log "Resource checking disabled (RESOURCE_CHECK_ENABLED=false)"
+        return 0
+    fi
+
+    log "Checking Proxmox host resources..."
+    local warnings=0
+    local errors=0
+
+    # Calculate required resources
+    local required_memory_mb=$((CP_MEMORY_MB + (WORKER_COUNT * WORKER_MEMORY_MB)))
+    local required_disk_gb=$((CP_DISK_GB + (WORKER_COUNT * WORKER_DISK_GB) + TEMPLATE_DISK_GB))
+
+    # Check available memory
+    local total_memory_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local available_memory_kb=$(grep MemAvailable /proc/meminfo | awk '{print $2}')
+    local total_memory_mb=$((total_memory_kb / 1024))
+    local available_memory_mb=$((available_memory_kb / 1024))
+
+    log "  Memory: ${available_memory_mb}MB available / ${total_memory_mb}MB total"
+    log "  Required: ${required_memory_mb}MB for cluster VMs"
+
+    if [[ "${available_memory_mb}" -lt "${required_memory_mb}" ]]; then
+        log "ERROR: Insufficient memory!"
+        log "ERROR: Available: ${available_memory_mb}MB, Required: ${required_memory_mb}MB"
+        ((errors++))
+    elif [[ "${available_memory_mb}" -lt $((required_memory_mb + 2048)) ]]; then
+        log "WARNING: Low memory margin (less than 2GB free after allocation)"
+        ((warnings++))
+    fi
+
+    # Check available disk space on storage
+    local storage_path
+    case "${PM_STORAGE}" in
+        "local-lvm")
+            # LVM storage - check VG free space
+            storage_path=$(pvesm status | grep "^${PM_STORAGE}" | awk '{print $2}' || echo "")
+            if [[ -n "${storage_path}" ]]; then
+                local vg_free_gb=$(vgs --noheadings --units g -o vg_free "${storage_path}" 2>/dev/null | tr -d 'g' | awk '{print int($1)}' || echo "0")
+                log "  Disk: ${vg_free_gb}GB available on ${PM_STORAGE}"
+
+                if [[ "${vg_free_gb}" -lt "${required_disk_gb}" ]]; then
+                    log "ERROR: Insufficient disk space!"
+                    log "ERROR: Available: ${vg_free_gb}GB, Required: ${required_disk_gb}GB"
+                    ((errors++))
+                elif [[ "${vg_free_gb}" -lt $((required_disk_gb + 20)) ]]; then
+                    log "WARNING: Low disk space margin (less than 20GB free after allocation)"
+                    ((warnings++))
+                fi
+            else
+                log "WARNING: Could not determine disk space for ${PM_STORAGE}"
+                ((warnings++))
+            fi
+            ;;
+        "local"|"local-zfs")
+            # Directory or ZFS storage - check filesystem
+            storage_path=$(pvesm path "${PM_STORAGE}:0" 2>/dev/null | xargs dirname || echo "/var/lib/vz")
+            local avail_gb=$(df -BG "${storage_path}" | tail -1 | awk '{print $4}' | tr -d 'G')
+            log "  Disk: ${avail_gb}GB available on ${PM_STORAGE} (${storage_path})"
+
+            if [[ "${avail_gb}" -lt "${required_disk_gb}" ]]; then
+                log "ERROR: Insufficient disk space!"
+                log "ERROR: Available: ${avail_gb}GB, Required: ${required_disk_gb}GB"
+                ((errors++))
+            elif [[ "${avail_gb}" -lt $((required_disk_gb + 20)) ]]; then
+                log "WARNING: Low disk space margin (less than 20GB free after allocation)"
+                ((warnings++))
+            fi
+            ;;
+        *)
+            log "WARNING: Unknown storage type ${PM_STORAGE}, skipping disk check"
+            ((warnings++))
+            ;;
+    esac
+
+    # Check CPU cores (informational only)
+    local cpu_cores=$(nproc)
+    local required_cores=$((CP_CORES + (WORKER_COUNT * WORKER_CORES)))
+    log "  CPU: ${cpu_cores} cores available, ${required_cores} cores will be allocated"
+
+    if [[ "${cpu_cores}" -lt "${required_cores}" ]]; then
+        log "WARNING: Allocated vCPUs (${required_cores}) exceed physical cores (${cpu_cores})"
+        log "WARNING: This will cause CPU overcommitment (may impact performance)"
+        ((warnings++))
+    fi
+
+    # Report results
+    if [[ "${errors}" -gt 0 ]]; then
+        log "ERROR: Resource check failed with ${errors} error(s) and ${warnings} warning(s)"
+        log "ERROR: Cannot proceed with deployment"
+
+        if [[ "${MENU_MODE}" == "true" ]]; then
+            echo ""
+            echo "INSUFFICIENT RESOURCES!"
+            echo "Please free up resources or reduce VM sizing in the script variables:"
+            echo "  - CP_MEMORY_MB (currently: ${CP_MEMORY_MB})"
+            echo "  - WORKER_MEMORY_MB (currently: ${WORKER_MEMORY_MB})"
+            echo "  - WORKER_COUNT (currently: ${WORKER_COUNT})"
+            echo ""
+            echo "Or set RESOURCE_CHECK_ENABLED=false to bypass this check (not recommended)"
+            echo ""
+            read -p "Press Enter to continue..."
+        fi
+        exit 1
+    elif [[ "${warnings}" -gt 0 ]]; then
+        log "WARNING: Resource check completed with ${warnings} warning(s)"
+
+        if [[ "${MENU_MODE}" == "true" ]]; then
+            echo ""
+            echo "RESOURCE WARNINGS DETECTED!"
+            echo "The system may experience performance issues or instability."
+            echo ""
+            if ! confirm_action "Continue anyway?"; then
+                log "Deployment cancelled due to resource warnings"
+                exit 1
+            fi
+        fi
+    else
+        log "Resource check passed"
+    fi
+}
+
+# Validate worker count is reasonable
+validate_worker_count() {
+    if [[ ! "${WORKER_COUNT}" =~ ^[0-9]+$ ]]; then
+        log "ERROR: WORKER_COUNT must be a number (got: ${WORKER_COUNT})"
+        exit 1
+    fi
+
+    if [[ "${WORKER_COUNT}" -lt 0 ]]; then
+        log "ERROR: WORKER_COUNT must be >= 0 (got: ${WORKER_COUNT})"
+        exit 1
+    fi
+
+    if [[ "${WORKER_COUNT}" -gt 50 ]]; then
+        log "ERROR: WORKER_COUNT is unreasonably high (${WORKER_COUNT})"
+        log "ERROR: This script supports maximum 50 workers"
+        log "ERROR: For larger clusters, consider using a proper orchestration tool"
+        exit 1
+    fi
+
+    if [[ "${WORKER_COUNT}" -gt 10 ]]; then
+        log "WARNING: High worker count (${WORKER_COUNT})"
+
+        if [[ "${MENU_MODE}" == "true" ]]; then
+            echo ""
+            echo "You have configured ${WORKER_COUNT} worker nodes."
+            echo "This will require significant resources and may take a long time to deploy."
+            echo ""
+            if ! confirm_action "Continue with ${WORKER_COUNT} workers?"; then
+                log "Deployment cancelled due to high worker count"
+                exit 1
+            fi
+        fi
+    fi
 }
 
 ############################################
@@ -561,6 +846,15 @@ action_reconfigure() {
     cleanup_previous_run
     ensure_root
     ensure_dirs
+
+    # Run pre-flight checks
+    log "Running pre-flight checks..."
+    validate_worker_count
+    ensure_ssh_keys
+    validate_network_config
+    check_host_resources
+    log "Pre-flight checks complete"
+    log ""
 
 log "============================================================================"
 log "Network (auto-detected from ${PM_BRIDGE}):"
