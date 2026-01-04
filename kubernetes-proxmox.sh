@@ -355,7 +355,16 @@ ensure_ssh_keys() {
         log "SSH key found at ${VM_SSH_KEY_PATH}"
 
         # Verify key permissions
-        local key_perms=$(stat -c '%a' "${VM_SSH_KEY_PATH}" 2>/dev/null || stat -f '%OLp' "${VM_SSH_KEY_PATH}" 2>/dev/null)
+        local key_perms=""
+        if key_perms=$(stat -c '%a' "${VM_SSH_KEY_PATH}" 2>/dev/null); then
+            :
+        elif key_perms=$(stat -f '%OLp' "${VM_SSH_KEY_PATH}" 2>/dev/null); then
+            :
+        else
+            log "WARNING: Unable to determine SSH key permissions. Forcing permissions to 600..."
+            chmod 600 "${VM_SSH_KEY_PATH}"
+            return
+        fi
         if [[ "${key_perms}" != "600" ]]; then
             log "WARNING: SSH key has insecure permissions (${key_perms}). Setting to 600..."
             chmod 600 "${VM_SSH_KEY_PATH}"
