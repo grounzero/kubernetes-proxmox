@@ -379,7 +379,7 @@ ensure_ssh_keys() {
             log "         - The target directory does not exist"
             log "         - Low or exhausted disk space on the filesystem"
             log "       Troubleshooting steps:"
-            log "         - Verify ssh-keygen is installed (e.g., 'ssh-keygen -V' or 'which ssh-keygen')"
+            log "         - Verify ssh-keygen is installed (e.g., 'ssh-keygen -h' or 'which ssh-keygen')"
             log "         - Check that $(dirname "${VM_SSH_KEY_PATH}") exists and is writable by the current user"
             log "         - Ensure there is sufficient free disk space"
             exit "${exit_code}"
