@@ -204,6 +204,7 @@ ANSIBLE_PLAYBOOK="${ANSIBLE_DIR}/site.yml"
 VM_NAME_PREFIX="k8s"
 STARTUP_WAIT_SECONDS="10"
 SSH_WAIT_TIMEOUT_SECONDS="${SSH_WAIT_TIMEOUT_SECONDS:-600}"  # Configurable timeout
+CLOUD_INIT_TIMEOUT_SECONDS="${CLOUD_INIT_TIMEOUT_SECONDS:-300}"  # Configurable cloud-init timeout
 
 # Resource validation settings
 MIN_REQUIRED_MEMORY_MB="8192"  # Minimum 8GB for control plane + 2 workers
@@ -1397,13 +1398,13 @@ log "Waiting for cloud-init to complete..."
 for node_ip in "${CP_IP}" "${WORKER_IPS[@]}"; do
     log "  Checking cloud-init status on ${node_ip}..."
 
-    # Wait for cloud-init to complete (timeout after 300 seconds)
+    # Wait for cloud-init to complete (configurable timeout via CLOUD_INIT_TIMEOUT_SECONDS)
     if ssh -i "${VM_SSH_KEY_PATH}" \
            -o StrictHostKeyChecking=no \
            -o UserKnownHostsFile=/dev/null \
            -o ConnectTimeout=10 \
            "${VM_USER}@${node_ip}" \
-           "timeout 300 cloud-init status --wait" 2>/dev/null; then
+           "timeout ${CLOUD_INIT_TIMEOUT_SECONDS} cloud-init status --wait" 2>/dev/null; then
         log "  [OK] Cloud-init completed on ${node_ip}"
     else
         log "WARNING: cloud-init status check failed on ${node_ip}"
@@ -1496,7 +1497,7 @@ cat > "${ANSIBLE_PLAYBOOK}" <<\EOF
   gather_facts: true
   tasks:
     - name: Wait for cloud-init to complete
-      command: cloud-init status --wait
+      command: timeout ${CLOUD_INIT_TIMEOUT_SECONDS} cloud-init status --wait
       changed_when: false
       failed_when: false
 
