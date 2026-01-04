@@ -327,7 +327,7 @@ ssh_vm_opts() {
     local custom_opts="$2"
     shift 2
     ssh -i "${VM_SSH_KEY_PATH}" \
-        ${custom_opts} \
+        "${custom_opts}" \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         "${VM_USER}@${target}" "$@"
