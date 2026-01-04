@@ -1411,12 +1411,7 @@ for node_ip in "${CP_IP}" "${WORKER_IPS[@]}"; do
         log "WARNING: This may cause configuration issues"
 
         # Check if cloud-init is at least done (even if it had errors)
-        local status=$(ssh -i "${VM_SSH_KEY_PATH}" \
-                          -o StrictHostKeyChecking=no \
-                          -o UserKnownHostsFile=/dev/null \
-                          -o ConnectTimeout=10 \
-                          "${VM_USER}@${node_ip}" \
-                          "cloud-init status" 2>/dev/null || echo "unknown")
+        local status=$(ssh_vm_opts "${node_ip}" "-o ConnectTimeout=10" "cloud-init status" 2>/dev/null || echo "unknown")
 
         if [[ "${status}" == *"done"* ]]; then
             log "  Cloud-init status shows 'done' on ${node_ip} (may have had errors)"
