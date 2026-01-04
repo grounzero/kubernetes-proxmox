@@ -237,11 +237,15 @@ pve_has_vmid() {
     qm status "$1" >/dev/null 2>&1
 }
 
-# Convert IP address to hostname format (e.g., 10.0.0.60 -> 10-0-0-60.local)
+# Convert IP and VM details to hostname format
+# Args: vmid, role, ip
+# Example: 9100, cp, 10.0.0.60 -> vm9100-cp-10-0-0-60.local
 ip_to_hostname() {
-    local ip="$1"
+    local vmid="$1"
+    local role="$2"
+    local ip="$3"
     local ip_dashed="${ip//./-}"
-    echo "${ip_dashed}.${VM_DOMAIN}"
+    echo "vm${vmid}-${role}-${ip_dashed}.${VM_DOMAIN}"
 }
 
 ensure_root() {
@@ -1634,7 +1638,7 @@ create_vm_from_template() {
 
 # Create control plane VM
 log "Setting up control plane..."
-CP_HOSTNAME="$(ip_to_hostname "${CP_IP}")"
+CP_HOSTNAME="$(ip_to_hostname "${CP_VMID}" "cp" "${CP_IP}")"
 create_vm_from_template "${CP_VMID}" "${CP_HOSTNAME}" "${CP_IP}" "${CP_CORES}" "${CP_MEMORY_MB}" "${CP_DISK_GB}"
 
 # Create worker VMs
@@ -1644,7 +1648,7 @@ WORKER_HOSTNAMES=()
 for ((i=0; i<WORKER_COUNT; i++)); do
     vmid=$(( WORKER_VMID_START + i ))
     ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
-    hostname="$(ip_to_hostname "${ip}")"
+    hostname="$(ip_to_hostname "${vmid}" "worker" "${ip}")"
     WORKER_IPS+=("${ip}")
     WORKER_HOSTNAMES+=("${hostname}")
     create_vm_from_template "${vmid}" "${hostname}" "${ip}" "${WORKER_CORES}" "${WORKER_MEMORY_MB}" "${WORKER_DISK_GB}"
