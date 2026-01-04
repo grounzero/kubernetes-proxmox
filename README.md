@@ -155,6 +155,19 @@ The script performs comprehensive checks before deployment:
    - Worker count limits (max 50, warns above 10)
    - Ensures numeric values for critical parameters
    - Validates storage configuration
+   - Kubernetes version validation against upstream repository
+
+4. **Image Integrity Verification**
+   - Downloads SHA256SUMS from Ubuntu cloud-images
+   - Verifies downloaded images before VM creation
+   - Fails deployment if checksum mismatch detected
+   - User confirmation if verification unavailable
+
+5. **Cloud-Init Synchronization**
+   - Explicit `cloud-init status --wait` after SSH availability
+   - Prevents race conditions with incomplete VM configuration
+   - Validates completion on all nodes before proceeding
+   - User confirmation if cloud-init fails
 
 ### Resource Requirements
 
