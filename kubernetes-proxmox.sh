@@ -998,10 +998,10 @@ if [[ ! -f "${UBUNTU_IMAGE_PATH}" ]]; then
     log "Downloading Ubuntu ${UBUNTU_RELEASE}..."
     curl -fsSL -o "${UBUNTU_IMAGE_PATH}" "${UBUNTU_IMAGE_URL}"
 
-    # Download SHA256SUMS file for verification
-    log "Downloading SHA256 checksums..."
-    local sha256_url="${UBUNTU_IMAGE_URL%/*}/SHA256SUMS"
-    local sha256_file="${UBUNTU_IMAGE_PATH}.sha256"
+        local expected_checksum=$(grep "$(basename "${UBUNTU_IMAGE_PATH}")" "${sha256_file}" | awk '{print $1}')
+
+        if [[ -z "${expected_checksum}" ]]; then
+            log "ERROR: Could not find checksum for $(basename "${UBUNTU_IMAGE_PATH}") in SHA256SUMS"
 
     if curl -fsSL -o "${sha256_file}" "${sha256_url}"; then
         log "Verifying image integrity..."
