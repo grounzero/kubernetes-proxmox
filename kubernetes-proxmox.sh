@@ -1375,15 +1375,7 @@ if ! need_cmd ansible; then
     apt-get install -y ansible
 fi
 
-# Generate SSH key for VM access if it doesn't exist
-if [[ ! -f "${VM_SSH_KEY_PATH}" || ! -f "${VM_SSH_PUBKEY_PATH}" ]]; then
-    log "Generating SSH key..."
-    mkdir -p "$(dirname "${VM_SSH_KEY_PATH}")"
-    chmod 700 "$(dirname "${VM_SSH_KEY_PATH}")"
-    ssh-keygen -t ed25519 -N "" -f "${VM_SSH_KEY_PATH}" -C "proxmox-k8s" >/dev/null
-fi
-chmod 600 "${VM_SSH_KEY_PATH}"
-chmod 644 "${VM_SSH_PUBKEY_PATH}"
+# SSH key generation is handled by ensure_ssh_keys() which includes security warnings
 
 # Determine Ubuntu cloud image
 if [[ -z "${UBUNTU_IMAGE_FILE}" ]]; then
@@ -2536,16 +2528,9 @@ action_reset_kubernetes() {
 }
 
 action_rename_vms() {
-    log "Renaming VMs to match current naming convention..."
+    log "Renaming VMs..."
 
-    echo ""
-    echo "This will rename VMs in Proxmox to match the new naming scheme:"
-    echo "  Current format: k8s-cp-1, k8s-worker-1, k8s-worker-2"
-    echo "  New format: vm9100-cp-10-0-0-60.local, vm9101-worker-10-0-0-61.local, etc."
-    echo ""
-    echo "Note: This only renames VMs in Proxmox UI, not hostnames inside VMs."
-    echo "      To update hostnames inside VMs, use Option 4 (Reset Kubernetes)."
-    echo ""
+    echo "This will rename VMs in Proxmox:"
 
     if ! confirm_action "Proceed with VM renaming?"; then
         log "VM renaming cancelled"
@@ -2635,8 +2620,17 @@ action_scale_cluster() {
             log "Attempting to drain nodes from Kubernetes..."
             for ((i=WORKER_COUNT; i<existing_workers; i++)); do
                 local orphan_ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
+
+                # Look up actual node name by IP address (handles renamed nodes and different naming conventions)
                 local node_name
-                node_name="$(ip_to_hostname "$((WORKER_VMID_START + i))" "${VM_ROLE_WORKER}" "${orphan_ip}")"
+                node_name=$(ssh_vm "${CP_IP}" "kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name} {.status.addresses[?(@.type==\"InternalIP\")].address}{\"\\n\"}{end}' 2>/dev/null | awk '\$2==\"${orphan_ip}\"{print \$1; exit}'" 2>/dev/null || echo "")
+
+                if [[ -z "${node_name}" ]]; then
+                    log "  No node found in cluster with IP ${orphan_ip} - skipping drain/delete"
+                    continue
+                fi
+
+                log "  Found node '${node_name}' with IP ${orphan_ip}"
                 log "  Draining ${node_name}..."
                 ssh_vm "${CP_IP}" "kubectl drain ${node_name} --delete-emptydir-data --force --ignore-daemonsets --timeout=60s" 2>/dev/null || log "    Failed to drain"
                 log "  Deleting ${node_name} from cluster..."
