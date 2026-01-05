@@ -2545,9 +2545,9 @@ action_rename_vms() {
         local new_cp_name="$(ip_to_hostname "${CP_VMID}" "cp" "${CP_IP}")"
         log "Renaming VM ${CP_VMID} to ${new_cp_name}..."
         if qm set "${CP_VMID}" --name "${new_cp_name}" 2>/dev/null; then
-            log "  ✓ Control plane renamed"
+            log "  [OK] Control plane renamed"
         else
-            log "  ✗ Failed to rename control plane"
+            log "  [FAIL] Failed to rename control plane"
         fi
     else
         log "Control plane VM ${CP_VMID} not found, skipping"
@@ -2561,9 +2561,9 @@ action_rename_vms() {
             local new_worker_name="$(ip_to_hostname "${vmid}" "worker" "${ip}")"
             log "Renaming VM ${vmid} to ${new_worker_name}..."
             if qm set "${vmid}" --name "${new_worker_name}" 2>/dev/null; then
-                log "  ✓ Worker $((i+1)) renamed"
+                log "  [OK] Worker $((i+1)) renamed"
             else
-                log "  ✗ Failed to rename worker $((i+1))"
+                log "  [FAIL] Failed to rename worker $((i+1))"
             fi
         else
             log "Worker VM ${vmid} not found, skipping"
