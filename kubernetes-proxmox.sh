@@ -16,7 +16,7 @@ Kubernetes on Proxmox - Cluster Management Script
 
 OPTIONS:
     -a ACTION    Run in non-interactive mode with specified action
-                 Actions: install, reconfigure, scale, reset, destroy, status, cleanup, update-deps, export-kubeconfig
+                 Actions: install, reconfigure, scale, reset, destroy, rename, status, cleanup, update-deps, export-kubeconfig
     -h           Display this help message
 
 EXAMPLES:
@@ -844,6 +844,18 @@ get_vm_status() {
     fi
 }
 
+get_vm_name() {
+    local vmid=$1
+    if pve_has_vmid "${vmid}"; then
+        # Extract VM name from qm config
+        local vm_name
+        vm_name=$(qm config "${vmid}" 2>/dev/null | grep "^name:" | sed 's/^name: //' || echo "vm${vmid}")
+        echo "${vm_name}"
+    else
+        echo "vm${vmid}"
+    fi
+}
+
 show_menu() {
     clear
     echo "============================================================================"
@@ -858,11 +870,14 @@ show_menu() {
     echo "  Ubuntu:        ${UBUNTU_RELEASE}"
     echo ""
     echo "VM Status:"
-    echo "  Template (${TEMPLATE_VMID}): $(get_vm_status ${TEMPLATE_VMID})"
-    echo "  CP1 (${CP_VMID}):      $(get_vm_status ${CP_VMID})"
+    local template_name=$(get_vm_name ${TEMPLATE_VMID})
+    echo "  ${template_name} (${TEMPLATE_VMID}): $(get_vm_status ${TEMPLATE_VMID})"
+    local cp_name=$(get_vm_name ${CP_VMID})
+    echo "  ${cp_name} (${CP_VMID}): $(get_vm_status ${CP_VMID})"
     for ((i=0; i<WORKER_COUNT; i++)); do
         vmid=$(( WORKER_VMID_START + i ))
-        printf "  Worker%d (%d):   %s\n" $((i+1)) ${vmid} "$(get_vm_status ${vmid})"
+        local worker_name=$(get_vm_name ${vmid})
+        printf "  %s (%d): %s\n" "${worker_name}" ${vmid} "$(get_vm_status ${vmid})"
     done
     echo ""
     echo "============================================================================"
@@ -872,12 +887,13 @@ show_menu() {
     echo "  3) Scale Cluster (Add or remove worker nodes)"
     echo "  4) Reset Kubernetes (Keep VMs, restart cluster)"
     echo "  5) Destroy Cluster (Delete all VMs)"
-    echo "  6) Stop/Start VMs (Power management)"
-    echo "  7) Kill Stuck Processes (Cleanup ansible/apt processes)"
-    echo "  8) View Status (Show detailed cluster information)"
-    echo "  9) SSH to Node (Quick SSH access)"
-    echo " 10) Update Dependencies (Update packages on all nodes)"
-    echo " 11) Export Kubeconfig (For Lens/external kubectl access)"
+    echo "  6) Rename VMs (Apply new naming scheme - non-destructive)"
+    echo "  7) Stop/Start VMs (Power management)"
+    echo "  8) Kill Stuck Processes (Cleanup ansible/apt processes)"
+    echo "  9) View Status (Show detailed cluster information)"
+    echo " 10) SSH to Node (Quick SSH access)"
+    echo " 11) Update Dependencies (Update packages on all nodes)"
+    echo " 12) Export Kubeconfig (For Lens/external kubectl access)"
     echo "  0) Exit"
     echo ""
     echo "============================================================================"
@@ -886,7 +902,7 @@ show_menu() {
 
 read_choice() {
     local choice
-    read -p "Enter choice [0-11]: " choice
+    read -p "Enter choice [0-12]: " choice
     echo "${choice}"
 }
 
@@ -905,11 +921,14 @@ action_view_status() {
     log "Viewing cluster status..."
     echo ""
     echo "=== VM Status ==="
-    echo "Template (${TEMPLATE_VMID}): $(get_vm_status ${TEMPLATE_VMID})"
-    echo "CP1 (${CP_VMID}): $(get_vm_status ${CP_VMID})"
+    local template_name=$(get_vm_name ${TEMPLATE_VMID})
+    echo "${template_name} (${TEMPLATE_VMID}): $(get_vm_status ${TEMPLATE_VMID})"
+    local cp_name=$(get_vm_name ${CP_VMID})
+    echo "${cp_name} (${CP_VMID}): $(get_vm_status ${CP_VMID})"
     for ((i=0; i<WORKER_COUNT; i++)); do
         vmid=$(( WORKER_VMID_START + i ))
-        echo "Worker$((i+1)) (${vmid}): $(get_vm_status ${vmid})"
+        local worker_name=$(get_vm_name ${vmid})
+        echo "${worker_name} (${vmid}): $(get_vm_status ${vmid})"
     done
 
     echo ""
@@ -1067,16 +1086,10 @@ action_export_kubeconfig() {
     # Create export directory
     mkdir -p "${KUBECONFIG_EXPORT_DIR}"
 
-    # Generate timestamp for filename
-    local timestamp=$(date +%Y%m%d-%H%M%S)
-    local kubeconfig_file="${KUBECONFIG_EXPORT_DIR}/kubeconfig-${timestamp}.yaml"
-    local kubeconfig_latest="${KUBECONFIG_EXPORT_DIR}/kubeconfig-latest.yaml"
-
     echo ""
-    echo "Export Options:"
-    echo "  1) Export with control plane IP (${CP_IP}) - for local network access"
-    echo "  2) Export with custom hostname/IP - for remote access or DNS name"
-    echo "  3) Print to console (display kubeconfig directly)"
+    echo "API Server Address Options:"
+    echo "  1) Use control plane IP (${CP_IP}) - for local network access"
+    echo "  2) Use custom hostname/IP - for remote access or DNS name"
     echo "  0) Cancel"
     echo ""
 
@@ -1101,53 +1114,6 @@ action_export_kubeconfig() {
                 return 1
             fi
             api_server_address="${custom_address}"
-            ;;
-        3)
-            # Print to console option
-            log "Fetching kubeconfig from control plane..."
-
-            # Fetch the admin.conf from control plane
-            local raw_kubeconfig
-            raw_kubeconfig=$(ssh_vm "${CP_IP}" "sudo cat /etc/kubernetes/admin.conf" 2>/dev/null)
-
-            if [[ -z "${raw_kubeconfig}" ]]; then
-                log "ERROR: Failed to fetch kubeconfig from control plane"
-                return 1
-            fi
-
-            # Replace the API server address
-            local modified_kubeconfig
-            modified_kubeconfig=$(echo "${raw_kubeconfig}" | sed "s|server: https://[^:]*:6443|server: https://${api_server_address}:6443|g")
-
-            # Update cluster name and context for clarity
-            # First, rename the cluster
-            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes$|name: proxmox-k8s|g")
-            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|cluster: kubernetes$|cluster: proxmox-k8s|g")
-
-            # Rename the user (both in users list and context reference)
-            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes-admin$|name: proxmox-k8s-admin|g")
-            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|user: kubernetes-admin$|user: proxmox-k8s-admin|g")
-
-            # Rename the context name and current-context
-            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes-admin@kubernetes$|name: proxmox-k8s-admin@proxmox-k8s|g")
-            modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|current-context: kubernetes-admin@kubernetes$|current-context: proxmox-k8s-admin@proxmox-k8s|g")
-
-            log "============================================================================"
-            log "Kubeconfig for API server: https://${api_server_address}:6443"
-            log "============================================================================"
-            echo ""
-            echo "Copy the content below (select and copy to clipboard):"
-            echo ""
-            echo "---BEGIN KUBECONFIG---"
-            echo "${modified_kubeconfig}"
-            echo "---END KUBECONFIG---"
-            echo ""
-            log "To use this kubeconfig:"
-            log "  1. Copy the content above to a file (e.g., ~/.kube/proxmox-k8s.yaml)"
-            log "  2. Use it with kubectl: export KUBECONFIG=~/.kube/proxmox-k8s.yaml"
-            log "  3. Or import to Lens by pasting the content"
-            log "============================================================================"
-            return 0
             ;;
         0)
             log "Export cancelled"
@@ -1187,58 +1153,77 @@ action_export_kubeconfig() {
     modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|name: kubernetes-admin@kubernetes$|name: proxmox-k8s-admin@proxmox-k8s|g")
     modified_kubeconfig=$(echo "${modified_kubeconfig}" | sed "s|current-context: kubernetes-admin@kubernetes$|current-context: proxmox-k8s-admin@proxmox-k8s|g")
 
-    # Write to timestamped file
-    echo "${modified_kubeconfig}" > "${kubeconfig_file}"
-    chmod 600 "${kubeconfig_file}"
-
-    # Update the latest symlink
-    ln -sf "$(basename "${kubeconfig_file}")" "${kubeconfig_latest}"
-
+    # Always print to console first
     log "============================================================================"
-    log "Kubeconfig exported successfully!"
+    log "Kubeconfig for API server: https://${api_server_address}:6443"
     log "============================================================================"
     echo ""
-    echo "Files created:"
-    echo "  ${kubeconfig_file}"
-    echo "  ${kubeconfig_latest} (symlink to latest)"
-    echo ""
-    echo "API Server: https://${api_server_address}:6443"
-    echo ""
-    echo "Usage Options:"
-    echo ""
-    echo "1. For Lens:"
-    echo "   - Open Lens"
-    echo "   - Click Add Cluster or +"
-    echo "   - Select Add from kubeconfig"
-    echo "   - Paste contents or browse to: ${kubeconfig_file}"
-    echo ""
-    echo "2. For kubectl (temporary):"
-    echo "   export KUBECONFIG=${kubeconfig_file}"
-    echo "   kubectl get nodes"
-    echo ""
-    echo "3. For kubectl (permanent - merge with existing):"
-    echo "   KUBECONFIG=~/.kube/config:${kubeconfig_file} kubectl config view --flatten > ~/.kube/config.new"
-    echo "   mv ~/.kube/config.new ~/.kube/config"
-    echo "   kubectl config use-context proxmox-k8s-admin@proxmox-k8s"
-    echo ""
-    echo "4. Copy to local machine:"
-    echo "   scp root@\$(hostname -I | awk '{print \$1}'):${kubeconfig_file} ~/.kube/proxmox-k8s.yaml"
+    echo "---BEGIN KUBECONFIG---"
+    echo "${modified_kubeconfig}"
+    echo "---END KUBECONFIG---"
     echo ""
 
-    # Verify the kubeconfig works
-    if [[ "${MENU_MODE}" == "true" ]]; then
+    # Ask if user wants to save to file
+    echo ""
+    if confirm_action "Save kubeconfig to file?"; then
+        # Generate timestamp for filename
+        local timestamp=$(date +%Y%m%d-%H%M%S)
+        local kubeconfig_file="${KUBECONFIG_EXPORT_DIR}/kubeconfig-${timestamp}.yaml"
+        local kubeconfig_latest="${KUBECONFIG_EXPORT_DIR}/kubeconfig-latest.yaml"
+
+        # Write to timestamped file
+        echo "${modified_kubeconfig}" > "${kubeconfig_file}"
+        chmod 600 "${kubeconfig_file}"
+
+        # Update the latest symlink
+        ln -sf "$(basename "${kubeconfig_file}")" "${kubeconfig_latest}"
+
+        log "============================================================================"
+        log "Kubeconfig saved to file!"
+        log "============================================================================"
         echo ""
-        if confirm_action "Test the kubeconfig now?"; then
-            log "Testing kubeconfig..."
-            if KUBECONFIG="${kubeconfig_file}" kubectl cluster-info --request-timeout=10s 2>/dev/null; then
-                echo ""
-                log "[OK] Kubeconfig is valid and cluster is accessible"
-            else
-                echo ""
-                log "WARNING: Could not connect to cluster using the exported kubeconfig"
-                log "This may be expected if testing from a different network"
+        echo "Files created:"
+        echo "  ${kubeconfig_file}"
+        echo "  ${kubeconfig_latest} (symlink to latest)"
+        echo ""
+        echo "Usage Options:"
+        echo ""
+        echo "1. For Lens:"
+        echo "   - Open Lens"
+        echo "   - Click Add Cluster or +"
+        echo "   - Select Add from kubeconfig"
+        echo "   - Browse to: ${kubeconfig_file}"
+        echo ""
+        echo "2. For kubectl (temporary):"
+        echo "   export KUBECONFIG=${kubeconfig_file}"
+        echo "   kubectl get nodes"
+        echo ""
+        echo "3. For kubectl (permanent - merge with existing):"
+        echo "   KUBECONFIG=~/.kube/config:${kubeconfig_file} kubectl config view --flatten > ~/.kube/config.new"
+        echo "   mv ~/.kube/config.new ~/.kube/config"
+        echo "   kubectl config use-context proxmox-k8s-admin@proxmox-k8s"
+        echo ""
+        echo "4. Copy to local machine:"
+        echo "   scp root@\$(hostname -I | awk '{print \$1}'):${kubeconfig_file} ~/.kube/proxmox-k8s.yaml"
+        echo ""
+
+        # Verify the kubeconfig works
+        if [[ "${MENU_MODE}" == "true" ]]; then
+            echo ""
+            if confirm_action "Test the kubeconfig now?"; then
+                log "Testing kubeconfig..."
+                if KUBECONFIG="${kubeconfig_file}" kubectl cluster-info --request-timeout=10s 2>/dev/null; then
+                    echo ""
+                    log "[OK] Kubeconfig is valid and cluster is accessible"
+                else
+                    echo ""
+                    log "WARNING: Could not connect to cluster using the exported kubeconfig"
+                    log "This may be expected if testing from a different network"
+                fi
             fi
         fi
+    else
+        log "Kubeconfig not saved to file (displayed above only)"
     fi
 
     log "============================================================================"
@@ -2538,6 +2523,59 @@ action_reset_kubernetes() {
     action_reconfigure
 }
 
+action_rename_vms() {
+    log "Renaming VMs to match current naming convention..."
+
+    echo ""
+    echo "This will rename VMs in Proxmox to match the new naming scheme:"
+    echo "  Current format: k8s-cp-1, k8s-worker-1, k8s-worker-2"
+    echo "  New format: vm9100-cp-10-0-0-60.local, vm9101-worker-10-0-0-61.local, etc."
+    echo ""
+    echo "Note: This only renames VMs in Proxmox UI, not hostnames inside VMs."
+    echo "      To update hostnames inside VMs, use Option 4 (Reset Kubernetes)."
+    echo ""
+
+    if ! confirm_action "Proceed with VM renaming?"; then
+        log "VM renaming cancelled"
+        return 0
+    fi
+
+    # Rename control plane VM
+    if pve_has_vmid "${CP_VMID}"; then
+        local new_cp_name="$(ip_to_hostname "${CP_VMID}" "cp" "${CP_IP}")"
+        log "Renaming VM ${CP_VMID} to ${new_cp_name}..."
+        if qm set "${CP_VMID}" --name "${new_cp_name}" 2>/dev/null; then
+            log "  ✓ Control plane renamed"
+        else
+            log "  ✗ Failed to rename control plane"
+        fi
+    else
+        log "Control plane VM ${CP_VMID} not found, skipping"
+    fi
+
+    # Rename worker VMs
+    for ((i=0; i<WORKER_COUNT; i++)); do
+        vmid=$(( WORKER_VMID_START + i ))
+        if pve_has_vmid "${vmid}"; then
+            ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
+            local new_worker_name="$(ip_to_hostname "${vmid}" "worker" "${ip}")"
+            log "Renaming VM ${vmid} to ${new_worker_name}..."
+            if qm set "${vmid}" --name "${new_worker_name}" 2>/dev/null; then
+                log "  ✓ Worker $((i+1)) renamed"
+            else
+                log "  ✗ Failed to rename worker $((i+1))"
+            fi
+        else
+            log "Worker VM ${vmid} not found, skipping"
+        fi
+    done
+
+    log "============================================================================"
+    log "VM renaming complete"
+    log "Note: Hostnames inside VMs are unchanged. Use 'Reset Kubernetes' to update those."
+    log "============================================================================"
+}
+
 action_scale_cluster() {
     log "Scaling cluster..."
 
@@ -2636,6 +2674,7 @@ if [[ "${MENU_MODE}" == "false" ]]; then
         scale) action_scale_cluster ;;
         reset) action_reset_kubernetes ;;
         destroy) action_destroy_cluster ;;
+        rename) action_rename_vms ;;
         status) action_view_status ;;
         cleanup) action_kill_processes ;;
         update-deps) action_update_dependencies ;;
@@ -2662,12 +2701,13 @@ while true; do
         3) action_scale_cluster ;;
         4) action_reset_kubernetes ;;
         5) action_destroy_cluster ;;
-        6) action_power_management ;;
-        7) action_kill_processes ;;
-        8) action_view_status ;;
-        9) action_ssh_node ;;
-        10) action_update_dependencies ;;
-        11) action_export_kubeconfig ;;
+        6) action_rename_vms ;;
+        7) action_power_management ;;
+        8) action_kill_processes ;;
+        9) action_view_status ;;
+        10) action_ssh_node ;;
+        11) action_update_dependencies ;;
+        12) action_export_kubeconfig ;;
         0) log "Exiting..."; exit 0 ;;
         *) echo "Invalid choice. Press Enter to continue..."; read ;;
     esac
