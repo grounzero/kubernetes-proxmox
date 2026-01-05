@@ -43,9 +43,147 @@ while getopts "a:h" opt; do
 done
 
 ############################################
-# CLEANUP PREVIOUS RUNS
+# USER CONFIGURABLE VARIABLES
 ############################################
 
+# Proxmox storage and networking
+PM_STORAGE="local-lvm"
+PM_BRIDGE="vmbr0"
+
+# Network configuration - will be set after detect_network_config() runs
+# You can override these by setting them as environment variables before running
+# Example: CP_IP=10.0.0.60 ./kubernetes-proxmox.sh
+NET_CIDR_PREFIX="${NET_CIDR_PREFIX:-}"
+NET_GATEWAY="${NET_GATEWAY:-}"
+NET_DNS="${NET_DNS:-1.1.1.1}"
+CP_IP="${CP_IP:-}"
+WORKER_IP_BASE="${WORKER_IP_BASE:-}"
+WORKER_IP_START_OCTET="${WORKER_IP_START_OCTET:-61}"
+
+# Ubuntu cloud image
+UBUNTU_RELEASE="24.04"
+UBUNTU_IMAGE_DIR="/var/lib/vz/template/iso"
+UBUNTU_IMAGE_FILE=""
+
+# Template and VM IDs
+TEMPLATE_VMID="9000"
+CP_VMID="9100"
+WORKER_VMID_START="9101"
+WORKER_COUNT="3"
+
+# VM sizing (separate settings for template, control plane, and workers)
+TEMPLATE_CORES="2"
+TEMPLATE_MEMORY_MB="2048"
+TEMPLATE_DISK_GB="30"
+
+# Control plane sizing
+# NOTE:
+# - The default 2048MB is intended for small development/test clusters with light workloads.
+# - For production or heavier workloads, set CP_MEMORY_MB to at least 4096 (8192+ recommended
+#   for larger clusters or many add-ons).
+CP_CORES="2"
+CP_MEMORY_MB="2048"
+CP_DISK_GB="50"
+WORKER_CORES="2"
+WORKER_MEMORY_MB="4096"
+WORKER_DISK_GB="50"
+
+# Cloud-init and SSH
+VM_USER="ubuntu"
+VM_SSH_KEY_PATH="/root/.ssh/id_ed25519"
+VM_SSH_PUBKEY_PATH="/root/.ssh/id_ed25519.pub"
+VM_DOMAIN="local"
+VM_NAME_PREFIX="k8s"
+VM_HOSTNAME_PREFIX="pve"
+VM_ROLE_CONTROL_PLANE="cp"
+VM_ROLE_WORKER="worker"
+
+# Kubernetes configuration (latest stable versions as of Jan 2026)
+K8S_CHANNEL="v1.35"
+K8S_SEMVER="1.35.0"
+K8S_PKG_VERSION="1.35.0-1.1"
+POD_CIDR="192.168.0.0/16"
+SERVICE_CIDR="10.96.0.0/12"
+CALICO_VERSION="v3.31.3"
+CALICO_MANIFEST_URL="https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
+
+# Miscellaneous
+ANSIBLE_DIR="/root/proxmox-k8s-ansible"
+ANSIBLE_INVENTORY="${ANSIBLE_DIR}/inventory.ini"
+ANSIBLE_CFG="${ANSIBLE_DIR}/ansible.cfg"
+ANSIBLE_PLAYBOOK="${ANSIBLE_DIR}/site.yml"
+
+STARTUP_WAIT_SECONDS="10"
+# Configurable via environment variable (default: 600 seconds for SSH, 300 for cloud-init)
+SSH_WAIT_TIMEOUT_SECONDS="${SSH_WAIT_TIMEOUT_SECONDS:-600}"
+CLOUD_INIT_TIMEOUT_SECONDS="${CLOUD_INIT_TIMEOUT_SECONDS:-300}"
+
+# Resource validation settings
+MIN_REQUIRED_MEMORY_MB="8192"  # Minimum 8GB for control plane + 2 workers
+MIN_REQUIRED_DISK_GB="100"     # Minimum 100GB free space
+RESOURCE_CHECK_ENABLED="${RESOURCE_CHECK_ENABLED:-true}"  # Set to false to skip checks
+
+# Fresh install flag (internal - set by action_fresh_install to skip IP conflict checks)
+SKIP_IP_CONFLICT_CHECK="${SKIP_IP_CONFLICT_CHECK:-false}"
+
+# Kubeconfig export settings
+KUBECONFIG_EXPORT_DIR="${KUBECONFIG_EXPORT_DIR:-/root/kubeconfigs}"
+
+############################################
+# UTILITY FUNCTIONS
+############################################
+
+# Auto-detect network configuration from Proxmox host
+detect_network_config() {
+    local bridge="${PM_BRIDGE}"
+
+    # Get bridge IP and calculate network
+    local bridge_info=$(ip -4 addr show "${bridge}" 2>/dev/null | grep "inet ")
+
+    if [[ -z "${bridge_info}" ]]; then
+        echo "ERROR: Could not detect IP configuration on bridge ${bridge}" >&2
+        echo "Please ensure ${bridge} exists and has an IP address configured" >&2
+        exit 1
+    fi
+
+    # Extract IP address and CIDR
+    local host_ip=$(echo "${bridge_info}" | awk '{print $2}' | cut -d'/' -f1)
+    local host_cidr=$(echo "${bridge_info}" | awk '{print $2}' | cut -d'/' -f2)
+
+    # Extract network prefix (assumes /24 - warn if not)
+    local network_prefix=$(echo "${host_ip}" | cut -d'.' -f1-3)
+
+    # Warn if not /24
+    if [[ "${host_cidr}" != "24" ]]; then
+        echo "WARNING: Detected CIDR /${host_cidr}. Default VM IP allocation assumes /24." >&2
+        echo "         Override CP_IP and WORKER_IP_BASE if needed, or implement proper CIDR math." >&2
+    fi
+
+    # Detect gateway from default route (more reliable than ping)
+    local detected_gateway=$(ip route show default 0.0.0.0/0 | awk '{print $3}' | head -n1)
+
+    # Fallback to .1 if no default route
+    if [[ -z "${detected_gateway}" ]]; then
+        detected_gateway="${network_prefix}.1"
+        echo "WARNING: No default route found, using ${detected_gateway} as gateway" >&2
+    fi
+
+    # Export detected values
+    AUTO_DETECTED_NETWORK_PREFIX="${network_prefix}"
+    AUTO_DETECTED_CIDR="${host_cidr}"
+    AUTO_DETECTED_GATEWAY="${detected_gateway}"
+    AUTO_DETECTED_HOST_IP="${host_ip}"
+}
+
+# Function to apply detected network config (called after detection)
+apply_network_defaults() {
+    NET_CIDR_PREFIX="${NET_CIDR_PREFIX:-${AUTO_DETECTED_CIDR}}"
+    NET_GATEWAY="${NET_GATEWAY:-${AUTO_DETECTED_GATEWAY}}"
+    CP_IP="${CP_IP:-${AUTO_DETECTED_NETWORK_PREFIX}.60}"
+    WORKER_IP_BASE="${WORKER_IP_BASE:-${AUTO_DETECTED_NETWORK_PREFIX}.}"
+}
+
+# Cleanup previous runs
 cleanup_previous_run() {
     # Ensure network config is initialized if not already done
     if [[ -z "${CP_IP}" ]]; then
@@ -95,139 +233,6 @@ cleanup_previous_run() {
 }
 
 ############################################
-# USER CONFIGURABLE VARIABLES
-############################################
-
-# Proxmox storage and networking
-PM_STORAGE="local-lvm"
-PM_BRIDGE="vmbr0"
-
-# Auto-detect network configuration from Proxmox host
-detect_network_config() {
-    local bridge="${PM_BRIDGE}"
-    
-    # Get bridge IP and calculate network
-    local bridge_info=$(ip -4 addr show "${bridge}" 2>/dev/null | grep "inet ")
-    
-    if [[ -z "${bridge_info}" ]]; then
-        echo "ERROR: Could not detect IP configuration on bridge ${bridge}" >&2
-        echo "Please ensure ${bridge} exists and has an IP address configured" >&2
-        exit 1
-    fi
-    
-    # Extract IP address and CIDR
-    local host_ip=$(echo "${bridge_info}" | awk '{print $2}' | cut -d'/' -f1)
-    local host_cidr=$(echo "${bridge_info}" | awk '{print $2}' | cut -d'/' -f2)
-    
-    # Extract network prefix (assumes /24 - warn if not)
-    local network_prefix=$(echo "${host_ip}" | cut -d'.' -f1-3)
-    
-    # Warn if not /24
-    if [[ "${host_cidr}" != "24" ]]; then
-        echo "WARNING: Detected CIDR /${host_cidr}. Default VM IP allocation assumes /24." >&2
-        echo "         Override CP_IP and WORKER_IP_BASE if needed, or implement proper CIDR math." >&2
-    fi
-    
-    # Detect gateway from default route (more reliable than ping)
-    local detected_gateway=$(ip route show default 0.0.0.0/0 | awk '{print $3}' | head -n1)
-    
-    # Fallback to .1 if no default route
-    if [[ -z "${detected_gateway}" ]]; then
-        detected_gateway="${network_prefix}.1"
-        echo "WARNING: No default route found, using ${detected_gateway} as gateway" >&2
-    fi
-    
-    # Export detected values
-    AUTO_DETECTED_NETWORK_PREFIX="${network_prefix}"
-    AUTO_DETECTED_CIDR="${host_cidr}"
-    AUTO_DETECTED_GATEWAY="${detected_gateway}"
-    AUTO_DETECTED_HOST_IP="${host_ip}"
-}
-
-# Network configuration - will be set after detect_network_config() runs
-# You can override these by setting them as environment variables before running
-# Example: CP_IP=10.0.0.60 ./kubernetes-proxmox.sh
-NET_CIDR_PREFIX="${NET_CIDR_PREFIX:-}"
-NET_GATEWAY="${NET_GATEWAY:-}"
-NET_DNS="${NET_DNS:-1.1.1.1}"
-CP_IP="${CP_IP:-}"
-WORKER_IP_BASE="${WORKER_IP_BASE:-}"
-WORKER_IP_START_OCTET="${WORKER_IP_START_OCTET:-61}"
-
-# Function to apply detected network config (called after detection)
-apply_network_defaults() {
-    NET_CIDR_PREFIX="${NET_CIDR_PREFIX:-${AUTO_DETECTED_CIDR}}"
-    NET_GATEWAY="${NET_GATEWAY:-${AUTO_DETECTED_GATEWAY}}"
-    CP_IP="${CP_IP:-${AUTO_DETECTED_NETWORK_PREFIX}.60}"
-    WORKER_IP_BASE="${WORKER_IP_BASE:-${AUTO_DETECTED_NETWORK_PREFIX}.}"
-}
-
-# Ubuntu cloud image
-UBUNTU_RELEASE="24.04"
-UBUNTU_IMAGE_DIR="/var/lib/vz/template/iso"
-UBUNTU_IMAGE_FILE=""
-
-# Template and VM IDs
-TEMPLATE_VMID="9000"
-CP_VMID="9100"
-WORKER_VMID_START="9101"
-WORKER_COUNT="3"
-
-# VM sizing (separate settings for template, control plane, and workers)
-TEMPLATE_CORES="2"
-TEMPLATE_MEMORY_MB="2048"
-TEMPLATE_DISK_GB="30"
-
-# Control plane sizing
-# NOTE:
-# - The default 2048MB is intended for small development/test clusters with light workloads.
-# - For production or heavier workloads, set CP_MEMORY_MB to at least 4096 (8192+ recommended
-#   for larger clusters or many add-ons).
-CP_CORES="2"
-CP_MEMORY_MB="2048"
-CP_DISK_GB="50"
-WORKER_CORES="2"
-WORKER_MEMORY_MB="4096"
-WORKER_DISK_GB="50"
-
-# Cloud-init and SSH
-VM_USER="ubuntu"
-VM_SSH_KEY_PATH="/root/.ssh/id_ed25519"
-VM_SSH_PUBKEY_PATH="/root/.ssh/id_ed25519.pub"
-VM_DOMAIN="local"
-
-# Kubernetes configuration (latest stable versions as of Jan 2026)
-K8S_CHANNEL="v1.35"
-K8S_SEMVER="1.35.0"
-K8S_PKG_VERSION="1.35.0-1.1"
-POD_CIDR="192.168.0.0/16"
-SERVICE_CIDR="10.96.0.0/12"
-CALICO_VERSION="v3.31.3"
-CALICO_MANIFEST_URL="https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-
-# Miscellaneous
-ANSIBLE_DIR="/root/proxmox-k8s-ansible"
-ANSIBLE_INVENTORY="${ANSIBLE_DIR}/inventory.ini"
-ANSIBLE_CFG="${ANSIBLE_DIR}/ansible.cfg"
-ANSIBLE_PLAYBOOK="${ANSIBLE_DIR}/site.yml"
-VM_NAME_PREFIX="k8s"
-STARTUP_WAIT_SECONDS="10"
-# Configurable via environment variable (default: 600 seconds for SSH, 300 for cloud-init)
-SSH_WAIT_TIMEOUT_SECONDS="${SSH_WAIT_TIMEOUT_SECONDS:-600}"
-CLOUD_INIT_TIMEOUT_SECONDS="${CLOUD_INIT_TIMEOUT_SECONDS:-300}"
-
-# Resource validation settings
-MIN_REQUIRED_MEMORY_MB="8192"  # Minimum 8GB for control plane + 2 workers
-MIN_REQUIRED_DISK_GB="100"     # Minimum 100GB free space
-RESOURCE_CHECK_ENABLED="${RESOURCE_CHECK_ENABLED:-true}"  # Set to false to skip checks
-
-# Fresh install flag (internal - set by action_fresh_install to skip IP conflict checks)
-SKIP_IP_CONFLICT_CHECK="${SKIP_IP_CONFLICT_CHECK:-false}"
-
-# Kubeconfig export settings
-KUBECONFIG_EXPORT_DIR="${KUBECONFIG_EXPORT_DIR:-/root/kubeconfigs}"
-
-############################################
 # INTERNAL HELPERS
 ############################################
 
@@ -245,13 +250,13 @@ pve_has_vmid() {
 
 # Convert IP and VM details to hostname format
 # Args: vmid, role, ip
-# Example: 9100, cp, 10.0.0.60 -> vm9100-cp-10-0-0-60.local
+# Example: 9100, cp, 10.0.0.60 -> pve9100-cp-10-0-0-60.local)
 ip_to_hostname() {
     local vmid="$1"
     local role="$2"
     local ip="$3"
     local ip_dashed="${ip//./-}"
-    echo "vm${vmid}-${role}-${ip_dashed}.${VM_DOMAIN}"
+    echo "${VM_HOSTNAME_PREFIX}${vmid}-${role}-${ip_dashed}.${VM_DOMAIN}"
 }
 
 ensure_root() {
@@ -598,8 +603,8 @@ check_host_resources() {
             local avail_gb=0
             local avail_kb
 
-            # Get available space from pvesm status
-            avail_kb=$(pvesm status -storage "${PM_STORAGE}" 2>/dev/null | grep "${PM_STORAGE}" | awk '{print $6}')
+            # Get available space from pvesm status (skip header, match storage name, get avail column)
+            avail_kb=$(pvesm status -storage "${PM_STORAGE}" 2>/dev/null | awk 'NR>1 && $1=="'"${PM_STORAGE}"'" {print $6; exit}')
             if [[ -n "${avail_kb}" ]] && [[ "${avail_kb}" =~ ^[0-9]+$ ]]; then
                 avail_gb=$((avail_kb / 1024 / 1024))
             fi
@@ -783,8 +788,11 @@ validate_k8s_version() {
     local version_pattern="${normalized_k8s_version}-"
 
     # Check if kubeadm package exists with our version
-    if echo "${package_info}" | grep -q "Package: kubeadm"; then
-        if echo "${package_info}" | grep -A5 "Package: kubeadm" | grep -q "Version:.*${version_pattern}"; then
+    local kubeadm_section
+    kubeadm_section="$(extract_package_section "kubeadm" "${package_info}")" || true
+
+    if [[ -n "${kubeadm_section}" ]]; then
+        if echo "${kubeadm_section}" | grep -qE "^Version: .*${version_pattern}"; then
             log "[OK] Kubernetes version ${K8S_SEMVER} found in repository"
         else
             log "ERROR: Kubernetes version ${K8S_SEMVER} not found in repository"
@@ -793,14 +801,9 @@ validate_k8s_version() {
 
             # Try to show available versions
             local available_versions
-            local kubeadm_section
 
             # Extract the kubeadm package section, then list up to 5 recent versions
-            if kubeadm_section=$(extract_package_section "kubeadm" "${package_info}"); then
-                if ! available_versions=$(printf '%s\n' "${kubeadm_section}" | grep '^Version:' | head -n 5 | sed 's/^Version: /  - /'); then
-                    available_versions="  (could not list versions)"
-                fi
-            else
+            if ! available_versions=$(printf '%s\n' "${kubeadm_section}" | grep '^Version:' | head -n 5 | sed 's/^Version: /  - /'); then
                 available_versions="  (could not list versions)"
             fi
             log "Recent versions in repository:"
@@ -941,10 +944,13 @@ action_view_status() {
     echo "=== Network Configuration ==="
     echo "Gateway: ${NET_GATEWAY}"
     echo "DNS: ${NET_DNS}"
-    echo "Control Plane IP: ${CP_IP}"
+    local cp_hostname="$(ip_to_hostname "${CP_VMID}" "${VM_ROLE_CONTROL_PLANE}" "${CP_IP}")"
+    echo "Control Plane: ${cp_hostname} (${CP_IP})"
     for ((i=0; i<WORKER_COUNT; i++)); do
-        ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
-        echo "Worker$((i+1)) IP: ${ip}"
+        local vmid=$(( WORKER_VMID_START + i ))
+        local ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
+        local hostname="$(ip_to_hostname "${vmid}" "${VM_ROLE_WORKER}" "${ip}")"
+        echo "Worker$((i+1)): ${hostname} (${ip})"
     done
 
     # Check if control plane is accessible
@@ -1629,7 +1635,7 @@ create_vm_from_template() {
 
 # Create control plane VM
 log "Setting up control plane..."
-CP_HOSTNAME="$(ip_to_hostname "${CP_VMID}" "cp" "${CP_IP}")"
+CP_HOSTNAME="$(ip_to_hostname "${CP_VMID}" "${VM_ROLE_CONTROL_PLANE}" "${CP_IP}")"
 create_vm_from_template "${CP_VMID}" "${CP_HOSTNAME}" "${CP_IP}" "${CP_CORES}" "${CP_MEMORY_MB}" "${CP_DISK_GB}"
 
 # Create worker VMs
@@ -1639,7 +1645,7 @@ WORKER_HOSTNAMES=()
 for ((i=0; i<WORKER_COUNT; i++)); do
     vmid=$(( WORKER_VMID_START + i ))
     ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
-    hostname="$(ip_to_hostname "${vmid}" "worker" "${ip}")"
+    hostname="$(ip_to_hostname "${vmid}" "${VM_ROLE_WORKER}" "${ip}")"
     WORKER_IPS+=("${ip}")
     WORKER_HOSTNAMES+=("${hostname}")
     create_vm_from_template "${vmid}" "${hostname}" "${ip}" "${WORKER_CORES}" "${WORKER_MEMORY_MB}" "${WORKER_DISK_GB}"
@@ -2548,7 +2554,7 @@ action_rename_vms() {
 
     # Rename control plane VM
     if pve_has_vmid "${CP_VMID}"; then
-        local new_cp_name="$(ip_to_hostname "${CP_VMID}" "cp" "${CP_IP}")"
+        local new_cp_name="$(ip_to_hostname "${CP_VMID}" "${VM_ROLE_CONTROL_PLANE}" "${CP_IP}")"
         log "Renaming VM ${CP_VMID} to ${new_cp_name}..."
         if qm set "${CP_VMID}" --name "${new_cp_name}" 2>/dev/null; then
             log "  [OK] Control plane renamed"
@@ -2564,7 +2570,7 @@ action_rename_vms() {
         vmid=$(( WORKER_VMID_START + i ))
         if pve_has_vmid "${vmid}"; then
             ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
-            local new_worker_name="$(ip_to_hostname "${vmid}" "worker" "${ip}")"
+            local new_worker_name="$(ip_to_hostname "${vmid}" "${VM_ROLE_WORKER}" "${ip}")"
             log "Renaming VM ${vmid} to ${new_worker_name}..."
             if qm set "${vmid}" --name "${new_worker_name}" 2>/dev/null; then
                 log "  [OK] Worker $((i+1)) renamed"
@@ -2578,7 +2584,7 @@ action_rename_vms() {
 
     log "============================================================================"
     log "VM renaming complete"
-    log "Note: Hostnames inside VMs are unchanged. Use 'Reset Kubernetes' to update those."
+    log "Note: Hostnames inside VMs are unchanged. Use 'Reconfigure/Update' to update those."
     log "============================================================================"
 }
 
@@ -2628,7 +2634,9 @@ action_scale_cluster() {
         if pve_has_vmid "${CP_VMID}" && [[ "$(get_vm_status ${CP_VMID})" == "running" ]]; then
             log "Attempting to drain nodes from Kubernetes..."
             for ((i=WORKER_COUNT; i<existing_workers; i++)); do
-                local node_name="worker$((i+1))"
+                local orphan_ip="$(ip_add_octet "${WORKER_IP_BASE}" "${WORKER_IP_START_OCTET}" "${i}")"
+                local node_name
+                node_name="$(ip_to_hostname "$((WORKER_VMID_START + i))" "${VM_ROLE_WORKER}" "${orphan_ip}")"
                 log "  Draining ${node_name}..."
                 ssh_vm "${CP_IP}" "kubectl drain ${node_name} --delete-emptydir-data --force --ignore-daemonsets --timeout=60s" 2>/dev/null || log "    Failed to drain"
                 log "  Deleting ${node_name} from cluster..."
