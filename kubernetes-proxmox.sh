@@ -177,6 +177,12 @@ WORKER_COUNT="3"
 TEMPLATE_CORES="2"
 TEMPLATE_MEMORY_MB="2048"
 TEMPLATE_DISK_GB="30"
+
+# Control plane sizing
+# NOTE:
+# - The default 2048MB is intended for small development/test clusters with light workloads.
+# - For production or heavier workloads, set CP_MEMORY_MB to at least 4096 (8192+ recommended
+#   for larger clusters or many add-ons).
 CP_CORES="2"
 CP_MEMORY_MB="2048"
 CP_DISK_GB="50"
