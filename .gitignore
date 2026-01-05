@@ -1,9 +1,12 @@
-# Claude Code artifacts
+# Artifacts
 .claude/
 
 # Temporary files
 *.md~
 .DS_Store
+
+# Config files
+*.config
 
 # Exclude non-project markdown files
 Act as a principal-level Software Securi.md
