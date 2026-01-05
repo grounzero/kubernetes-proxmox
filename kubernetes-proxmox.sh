@@ -2346,6 +2346,12 @@ action_fresh_install() {
         return 0
     fi
 
+    echo ""
+    if ! confirm_action "Type 'y' again to confirm PERMANENT DELETION and fresh install"; then
+        log "Initial installation cancelled"
+        return 0
+    fi
+
     # Stop and destroy all VMs (sweep up to 10 workers to catch orphans)
     log "Stopping and destroying VMs..."
 
